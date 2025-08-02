@@ -1,0 +1,23 @@
+# Ignore everything recursively
+*
+
+# Only check these files
+!*.js
+!*.jsx
+!*.cjs
+!*.ts
+!*.tsx
+!*.json
+!*.md
+!*.mdx
+!*.xml
+!*.yml
+!*.yaml
+
+# Check subdirectories too
+!*/
+
+packages/**/.next/**
+apps/**/.expo/**
+
+vercel.json

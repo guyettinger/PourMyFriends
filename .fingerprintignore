@@ -1,0 +1,2 @@
+# Ignore expo-dev-menu android folder. @see https://github.com/expo/expo/issues/37510
+**/node_modules/expo-dev-menu/android/**
