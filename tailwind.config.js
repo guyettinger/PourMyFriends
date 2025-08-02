@@ -1,5 +1,5 @@
 const { hairlineWidth } = require('nativewind/theme')
-const { ColorScheme } = require('./lib/color')
+const { COLORS } = require('./lib/colors')
 
 const toCssVariables = (theme) => {
   const cssVariables = {}
@@ -81,8 +81,8 @@ module.exports = {
     require('tailwindcss-animate'),
     ({ addBase }) =>
       addBase({
-        ':root': toCssVariables(ColorScheme.light),
-        '.dark:root': toCssVariables(ColorScheme.dark),
+        ':root': toCssVariables(COLORS.light),
+        '.dark:root': toCssVariables(COLORS.dark),
       }),
   ],
 }

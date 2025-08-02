@@ -1,12 +1,12 @@
-export const ColorScheme = {
+export const COLORS = {
   light: {
-    background: '#FFFFFF', // background
+    background: '#FFFFFF',
     foreground: '#0A0A0A',
-    border: '#E4E4E7', // border
-    card: '#FFFFFF', // card
-    notification: '#EF4444', // destructive
-    primary: '#18181B', // primary
-    text: '#09090B', // foreground
+    border: '#E4E4E7',
+    card: '#FFFFFF',
+    notification: '#EF4444',
+    primary: '#18181B',
+    text: '#09090B',
     title: '#E9E9E9',
     subtitle: '#838589',
     'subtitle-muted': '#515151',
@@ -16,13 +16,13 @@ export const ColorScheme = {
     header: '#0E0E0E99',
   },
   dark: {
-    background: '#000000', // background
+    background: '#000000',
     foreground: '#FAFAFA',
-    border: '#27272A', // border
-    card: '#09090B', // card
-    notification: '#DC2626', // destructive
-    primary: '#FAFAFA', // primary
-    text: '#FAFAFA', // foreground
+    border: '#27272A',
+    card: '#09090B',
+    notification: '#DC2626',
+    primary: '#FAFAFA',
+    text: '#FAFAFA',
     title: '#E9E9E9',
     subtitle: '#838589',
     'subtitle-muted': '#515151',
