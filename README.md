@@ -22,7 +22,7 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
 ```sh
 yarn                  # install node modules
 yarn env:development  # use the development environment variables
-yarn prebuild         # prebuild libraries without TV modifications
+yarn prebuild         # prebuild libraries
 yarn ios              # build and run Apple iOS
 yarn android          # build for run Android
 ```
@@ -32,7 +32,7 @@ yarn android          # build for run Android
 ```sh
 yarn                  # install node modules
 yarn env:development  # use the development environment variables
-yarn prebuild         # prebuild libraries without TV modifications
+yarn prebuild         # prebuild libraries
 yarn web              # build and run web - http://localhost:8081
 ```
 
