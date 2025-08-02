@@ -1,5 +1,5 @@
 const { hairlineWidth } = require('nativewind/theme')
-const { ColorScheme } = require('./constants/ColorScheme')
+const { ColorScheme } = require('./lib/color')
 
 const toCssVariables = (theme) => {
   const cssVariables = {}

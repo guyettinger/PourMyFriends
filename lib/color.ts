@@ -1,6 +1,7 @@
 export const ColorScheme = {
   light: {
     background: '#FFFFFF', // background
+    foreground: '#0A0A0A',
     border: '#E4E4E7', // border
     card: '#FFFFFF', // card
     notification: '#EF4444', // destructive
@@ -16,6 +17,7 @@ export const ColorScheme = {
   },
   dark: {
     background: '#000000', // background
+    foreground: '#FAFAFA',
     border: '#27272A', // border
     card: '#09090B', // card
     notification: '#DC2626', // destructive

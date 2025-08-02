@@ -29,7 +29,6 @@ export default ({}: ConfigContext): ExpoConfig => ({
     'expo-router',
     'expo-font',
     'expo-localization',
-    'expo-video',
   ],
   android: {
     adaptiveIcon: {
@@ -67,10 +66,10 @@ export default ({}: ConfigContext): ExpoConfig => ({
       origin: false,
     },
     eas: {
-      projectId: '6db17f31-042e-4c47-bdd4-18a8e4b9a736',
+      projectId: 'f6c13187-ed8e-4ba9-bce9-8784fdf8d88b',
     },
   },
-  owner: 'guyettinger',
+  owner: 'guy-ettinger',
   runtimeVersion: {
     policy: 'fingerprint',
   }

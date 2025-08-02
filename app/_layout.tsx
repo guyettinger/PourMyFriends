@@ -4,7 +4,7 @@ import { DarkTheme, DefaultTheme, Theme, ThemeProvider } from '@react-navigation
 import { useFonts } from 'expo-font'
 import { SplashScreen, Slot } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
-import { ColorScheme } from '~/constants/ColorScheme'
+import { ColorScheme } from '~/lib/color'
 import { useColorScheme } from '~/hooks/useColorScheme'
 import { AnalyticsProviders } from '~/components/providers/AnalyticsProviders'
 import { View } from '~/components/primitives/View'

@@ -4,7 +4,7 @@ import { Text } from '~/components/primitives/Text'
 export function HomeScreen() {
   return (
     <View className="flex h-full w-full flex-1 flex-col">
-        <Text>Hello World</Text>
+      <Text className="text-primary">Hello World</Text>
     </View>
   )
 }
