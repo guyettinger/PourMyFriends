@@ -1,4 +1,5 @@
 import { useCallback, useEffect } from 'react'
+import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { configureReanimatedLogger, ReanimatedLogLevel } from 'react-native-reanimated'
 import { DarkTheme, DefaultTheme, Theme, ThemeProvider } from '@react-navigation/native'
 import { useFonts } from 'expo-font'
@@ -61,13 +62,15 @@ export default function RootLayout() {
   }
 
   return (
-    <AnalyticsProviders>
-      <ThemeProvider value={colorScheme === 'dark' ? DARK_THEME : LIGHT_THEME}>
-        <StatusBar hidden={true} />
-        <View onLayout={onLayoutRootView} className="flex-1 bg-background">
-          <Slot />
-        </View>
-      </ThemeProvider>
-    </AnalyticsProviders>
+    <GestureHandlerRootView>
+      <AnalyticsProviders>
+        <ThemeProvider value={colorScheme === 'dark' ? DARK_THEME : LIGHT_THEME}>
+          <StatusBar hidden={true} />
+          <View onLayout={onLayoutRootView} className="flex-1 bg-background">
+            <Slot />
+          </View>
+        </ThemeProvider>
+      </AnalyticsProviders>
+    </GestureHandlerRootView>
   )
 }

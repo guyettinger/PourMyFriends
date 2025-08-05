@@ -26,6 +26,7 @@
     "@react-navigation/native": "^7.0.14",
     "@rn-primitives/slot": "~1.1.0",
     "@rn-primitives/types": "~1.1.0",
+    "@shopify/react-native-skia": "^2.1.1",
     "clsx": "^2.1.1",
     "dotenv-flow": "^4.1.0",
     "expo": "53.0.19",
