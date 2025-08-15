@@ -5,31 +5,31 @@ import { GLView } from 'expo-gl'
 const swidth = Dimensions.get('screen').width
 const sheight = Dimensions.get('screen').height
 
-// Configuration
+// Configuration for Latte Art Simulator
 const config = {
   SIM_RESOLUTION: 128,
   DYE_RESOLUTION: 512,
   CAPTURE_RESOLUTION: 512,
-  DENSITY_DISSIPATION: 1,
-  VELOCITY_DISSIPATION: 0.2,
-  PRESSURE: 0.8,
+  DENSITY_DISSIPATION: 0, // Slower dissipation for milk persistence
+  VELOCITY_DISSIPATION: 0.98, // Moderate viscosity for realistic milk displacement
+  PRESSURE: 1, // Higher pressure to enable milk pushing espresso away
   PRESSURE_ITERATIONS: 20,
-  CURL: 30,
-  SPLAT_RADIUS: 0.25,
-  SPLAT_FORCE: 6000,
+  CURL: 0, // Moderate curl for natural milk swirling and displacement
+  SPLAT_RADIUS: 0.01, // Larger radius for milk displacement effect
+  SPLAT_FORCE: 6000, // Higher force to push espresso and milk layers away
   SHADING: true,
-  COLORFUL: true,
+  COLORFUL: false, // Disable colorful mode for realistic coffee colors
   COLOR_UPDATE_SPEED: 10,
   PAUSED: false,
-  BACK_COLOR: { r: 0, g: 0, b: 0 },
+  BACK_COLOR: { r: 25, g: 15, b: 8 }, // Much darker espresso brown for maximum milk contrast
   TRANSPARENT: false,
-  BLOOM: true,
+  BLOOM: false,
   BLOOM_ITERATIONS: 8,
   BLOOM_RESOLUTION: 256,
-  BLOOM_INTENSITY: 0.8,
-  BLOOM_THRESHOLD: 0.6,
-  BLOOM_SOFT_KNEE: 0.7,
-  SUNRAYS: true,
+  BLOOM_INTENSITY: 0.9, // Enhanced bloom for better milk visibility and separation
+  BLOOM_THRESHOLD: 0.3, // Lower threshold to capture more milk details
+  BLOOM_SOFT_KNEE: 0.8, // Softer bloom transition for smoother milk appearance
+  SUNRAYS: false, // Disable sunrays for coffee realism
   SUNRAYS_RESOLUTION: 196,
   SUNRAYS_WEIGHT: 1.0,
 }
@@ -303,11 +303,50 @@ const advectionShader = `
   }`
 
 export const GLScreen = () => {
-  const panRef = useRef(new Animated.ValueXY()).current
   const touchingRef = useRef(false)
-  const fingerRef = useRef(null)
   const lastTouchRef = useRef({ x: 0, y: 0 })
   const splatStackRef = useRef([])
+  const touchPressureRef = useRef(0)
+  const pourIntervalRef = useRef(null)
+  const pourStartTimeRef = useRef(0)
+
+  // Optimized continuous pouring function with widening milk effect
+  const startContinuousPouring = () => {
+    if (pourIntervalRef.current) return // Already pouring
+
+    // Set pour start time when pouring begins
+    pourStartTimeRef.current = Date.now()
+
+    pourIntervalRef.current = setInterval(() => {
+      if (touchingRef.current && lastTouchRef.current) {
+        // Pre-calculate values to reduce per-frame computation
+        const baseVelocity = 15
+        const percentage = (.5 - Math.abs(.5 - lastTouchRef.current.x)) * 2
+        const pressure = (touchPressureRef.current || 1.0) * percentage;
+        const velocity = baseVelocity * pressure
+
+        // Calculate elapsed time since pour started (in seconds)
+        const elapsedTime = (Date.now() - pourStartTimeRef.current) / 1000
+
+        // Single optimized splat for performance - upward milk flow with widening effect
+        splatStackRef.current.push({
+          x: lastTouchRef.current.x,
+          y: lastTouchRef.current.y,
+          dx: 0, // No horizontal movement
+          dy: velocity, // Positive dy for upward flow
+          pressure: pressure,
+          elapsedTime: elapsedTime, // Track how long this splat has been pouring
+        })
+      }
+    }, 33) // 30fps continuous pouring for better performance
+  }
+
+  const stopContinuousPouring = () => {
+    if (pourIntervalRef.current) {
+      clearInterval(pourIntervalRef.current)
+      pourIntervalRef.current = null
+    }
+  }
 
   const panResponder = PanResponder.create({
     onStartShouldSetPanResponder: () => true,
@@ -319,29 +358,38 @@ export const GLScreen = () => {
       const x = evt.nativeEvent.locationX / swidth
       const y = 1.0 - evt.nativeEvent.locationY / sheight
       lastTouchRef.current = { x, y }
+
+      // Get touch pressure (force) - defaults to 1.0 if not available
+      const pressure = evt.nativeEvent.force || 1.0
+      touchPressureRef.current = Math.max(0.1, Math.min(1.0, pressure))
+
+      // Start continuous pouring immediately when touch begins
+      startContinuousPouring()
     },
     onPanResponderMove: (evt, gestureState) => {
       if (touchingRef.current) {
-        const x = evt.nativeEvent.locationX / swidth
-        const y = 1.0 - evt.nativeEvent.locationY / sheight
-        const dx = (x - lastTouchRef.current.x) * 1000
-        const dy = (y - lastTouchRef.current.y) * 1000
-        
-        splatStackRef.current.push({ x, y, dx, dy })
-        lastTouchRef.current = { x, y }
+        // Simplified coordinate calculation
+        lastTouchRef.current.x = evt.nativeEvent.locationX / swidth
+        lastTouchRef.current.y = 1.0 - evt.nativeEvent.locationY / sheight
+
+        // Simplified pressure update - avoid unnecessary Math operations
+        const pressure = evt.nativeEvent.force || 1.0
+        touchPressureRef.current = pressure < 0.1 ? 0.1 : pressure > 1.0 ? 1.0 : pressure
       }
-      fingerRef.current = gestureState
     },
     onPanResponderRelease: () => {
       touchingRef.current = false
-    }
+      touchPressureRef.current = 0
+      // Stop continuous pouring when touch ends
+      stopContinuousPouring()
+    },
   })
 
   return (
-    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'black' }}>
-      <GLView 
-        style={{ width: swidth, height: sheight }} 
-        onContextCreate={(gl) => onContextCreate(gl, splatStackRef)} 
+    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgb(25, 15, 8)' }}>
+      <GLView
+        style={{ width: swidth, height: sheight }}
+        onContextCreate={(gl) => onContextCreate(gl, splatStackRef)}
         {...panResponder.panHandlers}
       />
     </View>
@@ -351,7 +399,7 @@ export const GLScreen = () => {
 function onContextCreate(gl, splatStackRef) {
   // Utility functions
   function getWebGLContext(gl) {
-    const isWebGL2 = (gl instanceof WebGL2RenderingContext)
+    const isWebGL2 = gl instanceof WebGL2RenderingContext
     let halfFloat
     let supportLinearFiltering
     if (isWebGL2) {
@@ -361,7 +409,6 @@ function onContextCreate(gl, splatStackRef) {
       halfFloat = gl.getExtension('OES_texture_half_float')
       supportLinearFiltering = gl.getExtension('OES_texture_half_float_linear')
     }
-    gl.clearColor(0.0, 1.0, 1.0, 1.0)
     const halfFloatTexType = isWebGL2 ? gl.HALF_FLOAT : halfFloat.HALF_FLOAT_OES
     let formatRGBA
     let formatRG
@@ -382,8 +429,8 @@ function onContextCreate(gl, splatStackRef) {
         formatRG,
         formatR,
         halfFloatTexType,
-        supportLinearFiltering
-      }
+        supportLinearFiltering,
+      },
     }
   }
 
@@ -400,7 +447,7 @@ function onContextCreate(gl, splatStackRef) {
     }
     return {
       internalFormat,
-      format
+      format,
     }
   }
 
@@ -421,53 +468,24 @@ function onContextCreate(gl, splatStackRef) {
 
   function getResolution(gl, resolution) {
     let aspectRatio = gl.drawingBufferWidth / gl.drawingBufferHeight
-    if (aspectRatio < 1)
-      aspectRatio = 1.0 / aspectRatio
+    if (aspectRatio < 1) aspectRatio = 1.0 / aspectRatio
     let min = Math.round(resolution)
     let max = Math.round(resolution * aspectRatio)
-    if (gl.drawingBufferWidth > gl.drawingBufferHeight)
-      return { width: max, height: min }
-    else
-      return { width: min, height: max }
-  }
-
-  function generateColor() {
-    let c = HSVtoRGB(Math.random(), 1.0, 1.0)
-    c.r *= 0.15
-    c.g *= 0.15
-    c.b *= 0.15
-    return c
-  }
-
-  function HSVtoRGB(h, s, v) {
-    let r, g, b, i, f, p, q, t
-    i = Math.floor(h * 6)
-    f = h * 6 - i
-    p = v * (1 - s)
-    q = v * (1 - f * s)
-    t = v * (1 - (1 - f) * s)
-    switch (i % 6) {
-      case 0: r = v, g = t, b = p; break
-      case 1: r = q, g = v, b = p; break
-      case 2: r = p, g = v, b = t; break
-      case 3: r = p, g = q, b = v; break
-      case 4: r = t, g = p, b = v; break
-      case 5: r = v, g = p, b = q; break
-    }
-    return { r, g, b }
+    if (gl.drawingBufferWidth > gl.drawingBufferHeight) return { width: max, height: min }
+    else return { width: min, height: max }
   }
 
   function normalizeColor(input) {
     return {
       r: input.r / 255,
       g: input.g / 255,
-      b: input.b / 255
+      b: input.b / 255,
     }
   }
 
   // Initialize WebGL context
   const { gl: glContext, ext } = getWebGLContext(gl)
-  
+
   if (!ext.supportLinearFiltering) {
     config.DYE_RESOLUTION = 512
     config.SHADING = false
@@ -481,15 +499,14 @@ function onContextCreate(gl, splatStackRef) {
     const shader = gl.createShader(type)
     gl.shaderSource(shader, source)
     gl.compileShader(shader)
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS))
-      console.trace(gl.getShaderInfoLog(shader))
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) console.trace(gl.getShaderInfoLog(shader))
     return shader
   }
 
   function addKeywords(source, keywords) {
     if (keywords == null) return source
     let keywordsString = ''
-    keywords.forEach(keyword => {
+    keywords.forEach((keyword) => {
       keywordsString += '#define ' + keyword + '\n'
     })
     return keywordsString + source
@@ -500,8 +517,7 @@ function onContextCreate(gl, splatStackRef) {
     gl.attachShader(program, vertexShader)
     gl.attachShader(program, fragmentShader)
     gl.linkProgram(program)
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS))
-      console.trace(gl.getProgramInfoLog(program))
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) console.trace(gl.getProgramInfoLog(program))
     return program
   }
 
@@ -529,18 +545,22 @@ function onContextCreate(gl, splatStackRef) {
   }
 
   // Compile shaders
-  const baseVertex = compileShader(gl.VERTEX_SHADER, baseVertexShader, ["baseVertex"])
-  const copyFrag = compileShader(gl.FRAGMENT_SHADER, copyShader, ["copyFrag"])
-  const colorFrag = compileShader(gl.FRAGMENT_SHADER, colorShader, ["colorFrag"])
-  const splatFrag = compileShader(gl.FRAGMENT_SHADER, splatShader, ["splatFrag"])
-  const displayFrag = compileShader(gl.FRAGMENT_SHADER, displayShader, ["displayFrag"])
-  const curlFrag = compileShader(gl.FRAGMENT_SHADER, curlShader, ["curlFrag"])
-  const vorticityFrag = compileShader(gl.FRAGMENT_SHADER, vorticityShader, ["vorticityFrag"])
-  const divergenceFrag = compileShader(gl.FRAGMENT_SHADER, divergenceShader, ["divergenceFrag"])
-  const clearFrag = compileShader(gl.FRAGMENT_SHADER, clearShader, ["clearFrag"])
-  const pressureFrag = compileShader(gl.FRAGMENT_SHADER, pressureShader, ["pressureFrag"])
-  const gradientFrag = compileShader(gl.FRAGMENT_SHADER, gradientShader, ["gradientFrag"])
-  const advectionFrag = compileShader(gl.FRAGMENT_SHADER, advectionShader, ext.supportLinearFiltering ? null : ["MANUAL_FILTERING"])
+  const baseVertex = compileShader(gl.VERTEX_SHADER, baseVertexShader, ['baseVertex'])
+  const copyFrag = compileShader(gl.FRAGMENT_SHADER, copyShader, ['copyFrag'])
+  const colorFrag = compileShader(gl.FRAGMENT_SHADER, colorShader, ['colorFrag'])
+  const splatFrag = compileShader(gl.FRAGMENT_SHADER, splatShader, ['splatFrag'])
+  const displayFrag = compileShader(gl.FRAGMENT_SHADER, displayShader, ['displayFrag'])
+  const curlFrag = compileShader(gl.FRAGMENT_SHADER, curlShader, ['curlFrag'])
+  const vorticityFrag = compileShader(gl.FRAGMENT_SHADER, vorticityShader, ['vorticityFrag'])
+  const divergenceFrag = compileShader(gl.FRAGMENT_SHADER, divergenceShader, ['divergenceFrag'])
+  const clearFrag = compileShader(gl.FRAGMENT_SHADER, clearShader, ['clearFrag'])
+  const pressureFrag = compileShader(gl.FRAGMENT_SHADER, pressureShader, ['pressureFrag'])
+  const gradientFrag = compileShader(gl.FRAGMENT_SHADER, gradientShader, ['gradientFrag'])
+  const advectionFrag = compileShader(
+    gl.FRAGMENT_SHADER,
+    advectionShader,
+    ext.supportLinearFiltering ? null : ['MANUAL_FILTERING'],
+  )
 
   // Create programs
   const copyProgram = new Program(baseVertex, copyFrag)
@@ -607,7 +627,7 @@ function onContextCreate(gl, splatStackRef) {
         gl.activeTexture(gl.TEXTURE0 + id)
         gl.bindTexture(gl.TEXTURE_2D, texture)
         return id
-      }
+      },
     }
   }
 
@@ -635,7 +655,7 @@ function onContextCreate(gl, splatStackRef) {
         let temp = fbo1
         fbo1 = fbo2
         fbo2 = temp
-      }
+      },
     }
   }
 
@@ -645,7 +665,7 @@ function onContextCreate(gl, splatStackRef) {
   let curl
   let divergence
   let pressure
-  
+
   function initFramebuffers() {
     let simRes = getResolution(gl, config.SIM_RESOLUTION)
     let dyeRes = getResolution(gl, config.DYE_RESOLUTION)
@@ -655,13 +675,12 @@ function onContextCreate(gl, splatStackRef) {
     const r = ext.formatR
     const filtering = ext.supportLinearFiltering ? gl.LINEAR : gl.NEAREST
     gl.disable(gl.BLEND)
-    
+
     if (dye == null)
       dye = createDoubleFBO(dyeRes.width, dyeRes.height, rgba.internalFormat, rgba.format, texType, filtering)
     if (velocity == null)
       velocity = createDoubleFBO(simRes.width, simRes.height, rg.internalFormat, rg.format, texType, filtering)
-    if (curl == null)
-      curl = createFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST)
+    if (curl == null) curl = createFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST)
     if (divergence == null)
       divergence = createFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST)
     if (pressure == null)
@@ -669,44 +688,48 @@ function onContextCreate(gl, splatStackRef) {
   }
 
   // Simulation functions
-  function splat(x, y, dx, dy, color) {
+  function splat(x, y, dx, dy, color, customRadius) {
+    // Use custom radius if provided, otherwise use default from config
+    const radius = customRadius !== undefined ? customRadius / 100.0 : config.SPLAT_RADIUS / 100.0
+
     splatProgram.bind()
     gl.uniform1i(splatProgram.uniforms.uTarget, velocity.read.attach(0))
     gl.uniform1f(splatProgram.uniforms.aspectRatio, swidth / sheight)
     gl.uniform2f(splatProgram.uniforms.point, x, y)
     gl.uniform3f(splatProgram.uniforms.color, dx, dy, 0.0)
-    gl.uniform1f(splatProgram.uniforms.radius, config.SPLAT_RADIUS / 100.0)
+    gl.uniform1f(splatProgram.uniforms.radius, radius)
     blit(velocity.write)
     velocity.swap()
-    
+
     gl.uniform1i(splatProgram.uniforms.uTarget, dye.read.attach(0))
     gl.uniform3f(splatProgram.uniforms.color, color.r, color.g, color.b)
     blit(dye.write)
     dye.swap()
   }
 
-  function multipleSplats(amount) {
-    for (let i = 0; i < amount; i++) {
-      const color = generateColor()
-      color.r *= 10.0
-      color.g *= 10.0
-      color.b *= 10.0
-      const x = Math.random()
-      const y = Math.random()
-      const dx = 1000 * (Math.random() - 0.5)
-      const dy = 1000 * (Math.random() - 0.5)
-      splat(x, y, dx, dy, color)
-    }
-  }
+  // Pre-calculated milk color for performance
+  const milkColor = { r: 0.98, g: 0.97, b: 0.92 }
 
   function applyInputs() {
-    if (splatStackRef.current.length > 0) {
+    // Process maximum 2 splats per frame to reduce rendering load
+    const maxSplatsPerFrame = 2
+    let processed = 0
+
+    while (splatStackRef.current.length > 0 && processed < maxSplatsPerFrame) {
       const splatData = splatStackRef.current.shift()
-      const color = generateColor()
-      color.r *= 10.0
-      color.g *= 10.0
-      color.b *= 10.0
-      splat(splatData.x, splatData.y, splatData.dx, splatData.dy, color)
+
+      // Use pre-calculated color with pressure-based intensity
+      const finalIntensity = splatData.pressure || 1.0
+
+      const color = {
+        r: milkColor.r * finalIntensity,
+        g: milkColor.g * finalIntensity,
+        b: milkColor.b * finalIntensity,
+      }
+
+      // Pass the dynamic radius to the splat function
+      splat(splatData.x, splatData.y, splatData.dx, splatData.dy, color, config.SPLAT_RADIUS)
+      processed++
     }
   }
 
@@ -724,13 +747,13 @@ function onContextCreate(gl, splatStackRef) {
 
   function step(dt) {
     gl.disable(gl.BLEND)
-    
+
     // Curl
     curlProgram.bind()
     gl.uniform2f(curlProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
     gl.uniform1i(curlProgram.uniforms.uVelocity, velocity.read.attach(0))
     blit(curl)
-    
+
     // Vorticity
     vorticityProgram.bind()
     gl.uniform2f(vorticityProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
@@ -740,20 +763,20 @@ function onContextCreate(gl, splatStackRef) {
     gl.uniform1f(vorticityProgram.uniforms.dt, dt)
     blit(velocity.write)
     velocity.swap()
-    
+
     // Divergence
     divergenceProgram.bind()
     gl.uniform2f(divergenceProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
     gl.uniform1i(divergenceProgram.uniforms.uVelocity, velocity.read.attach(0))
     blit(divergence)
-    
+
     // Clear pressure
     clearProgram.bind()
     gl.uniform1i(clearProgram.uniforms.uTexture, pressure.read.attach(0))
     gl.uniform1f(clearProgram.uniforms.value, config.PRESSURE)
     blit(pressure.write)
     pressure.swap()
-    
+
     // Pressure solve
     pressureProgram.bind()
     gl.uniform2f(pressureProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
@@ -763,7 +786,7 @@ function onContextCreate(gl, splatStackRef) {
       blit(pressure.write)
       pressure.swap()
     }
-    
+
     // Gradient subtract
     gradientSubtractProgram.bind()
     gl.uniform2f(gradientSubtractProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
@@ -771,7 +794,7 @@ function onContextCreate(gl, splatStackRef) {
     gl.uniform1i(gradientSubtractProgram.uniforms.uVelocity, velocity.read.attach(1))
     blit(velocity.write)
     velocity.swap()
-    
+
     // Advect velocity
     advectionProgram.bind()
     gl.uniform2f(advectionProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
@@ -784,7 +807,7 @@ function onContextCreate(gl, splatStackRef) {
     gl.uniform1f(advectionProgram.uniforms.dissipation, config.VELOCITY_DISSIPATION)
     blit(velocity.write)
     velocity.swap()
-    
+
     // Advect dye
     if (!ext.supportLinearFiltering)
       gl.uniform2f(advectionProgram.uniforms.dyeTexelSize, dye.texelSizeX, dye.texelSizeY)
@@ -796,14 +819,12 @@ function onContextCreate(gl, splatStackRef) {
   }
 
   function render(target) {
-    if (!config.TRANSPARENT)
-      drawColor(target, normalizeColor(config.BACK_COLOR))
+    if (!config.TRANSPARENT) drawColor(target, normalizeColor(config.BACK_COLOR))
     drawDisplay(target)
   }
 
   // Initialize
   initFramebuffers()
-  multipleSplats(parseInt(Math.random() * 20) + 5)
 
   let lastUpdateTime = Date.now()
 
@@ -818,8 +839,7 @@ function onContextCreate(gl, splatStackRef) {
   function update() {
     const dt = calcDeltaTime()
     applyInputs()
-    if (!config.PAUSED)
-      step(dt)
+    if (!config.PAUSED) step(dt)
     render(null)
     gl.endFrameEXP()
     requestAnimationFrame(update)
