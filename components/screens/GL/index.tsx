@@ -7,15 +7,15 @@ const sheight = Dimensions.get('screen').height
 
 // Configuration for Latte Art Simulator (espresso + frothed milk)
 const config = {
-  SIM_RESOLUTION: 128,
-  DYE_RESOLUTION: 512,
-  CAPTURE_RESOLUTION: 512,
+  SIM_RESOLUTION: 512,
+  DYE_RESOLUTION: 1024,
+  CAPTURE_RESOLUTION: 1024,
 
   // Fluid tuning
   DENSITY_DISSIPATION: 0, // milk shouldn't fade
   VELOCITY_DISSIPATION: 1, // thicker flow
   PRESSURE: 1,
-  PRESSURE_ITERATIONS: 1, // more stable surface
+  PRESSURE_ITERATIONS: 1, // better incompressibility for smoother motion
   CURL: 0, // gentle roll for leaf edges
 
   // Pour tuning (percent of screen width/height in splat())
@@ -42,12 +42,16 @@ const config = {
   SUNRAYS_WEIGHT: 1.0,
 
   // Latte-art specifics
-  USE_MACCORMACK: true, // sharper transport for milk mask
+  USE_MACCORMACK: false, // sharper transport for milk mask
   BUOYANCY: 0.0, // milk rides to the "top"
   MASK_HARDEN: 0.0, // sharpen mask in display compositing
-  MILK_SPECULAR: 0.01, // subtle highlight on milk
-  ESPRESSO_COLOR: { r: 0.15, g: 0.09, b: 0.06 },
-  MILK_COLOR: { r: 0.98, g: 0.97, b: 0.92 },
+  MILK_SPECULAR: 0.0, // subtle highlight on milk (reduced to avoid blowout)
+  SPECULAR_POWER: 32.0, // shininess for spec term
+  SPECULAR_CLAMP: 0.06, // clamp spec contribution to avoid white jaggies
+  MILK_OPACITY: 0.85, // allow espresso to show through milk a bit
+  CREMA_STRENGTH: 0.03, // subtle crema noise strength
+  ESPRESSO_COLOR: { r: 0.10, g: 0.06, b: 0.04 },
+  MILK_COLOR: { r: 1.0, g: 0.98, b: 0.95 },
 }
 
 // Shaders
@@ -83,6 +87,10 @@ uniform sampler2D uTexture; // dye as milk mask (use R)
 uniform vec3 uEspresso;
 uniform vec3 uMilk;
 uniform float uSpec;        // milk specular intensity
+uniform float uSpecPower;   // specular shininess
+uniform float uSpecClamp;   // clamp for spec highlight
+uniform float uMilkOpacity; // milk opacity factor
+uniform float uCremaStrength; // crema noise strength
 uniform float harden;       // mask hardening [0,1]
 uniform vec2 texelSize;
 
@@ -100,8 +108,9 @@ void main () {
   float mt = texture2D(uTexture, vT).r;
   float mb = texture2D(uTexture, vB).r;
 
-  // Harder mask for crisp latte art edges
+  // Mask for edges and blend; apply user hardening
   float mask = mix(m, smoothstep(0.0, 1.0, m), harden);
+  float maskAlpha = clamp(mask * uMilkOpacity, 0.0, 1.0);
 
   // Normal from mask gradient for milky highlight
   float dx = mr - ml;
@@ -111,15 +120,21 @@ void main () {
   vec3 lightDir = normalize(vec3(0.0, 0.0, 1.0));
   float diff = clamp(dot(n, lightDir), 0.0, 1.0);
 
-  // Espresso base with subtle crema noise
-  float crema = 1.0 + (hash(vUv * 1024.0) * 2.0 - 1.0) * 0.02;
+  // Espresso base with subtle crema noise (show more where milk is thinner)
+  float crema = 1.0 + (hash(vUv * 1024.0) * 2.0 - 1.0) * uCremaStrength * (1.0 - maskAlpha);
   vec3 espresso = uEspresso * crema;
 
-  // Milk shading: slightly brighter with a tiny specular
-  float spec = pow(max(dot(reflect(-lightDir, n), vec3(0.0, 0.0, 1.0)), 0.0), 48.0) * uSpec;
-  vec3 milkCol = uMilk * (0.8 + 0.2 * diff) + spec;
+  // Specular: softened, gated by mask to avoid edge jaggies and clamped to avoid white blowout
+  float specRaw = pow(max(dot(reflect(-lightDir, n), vec3(0.0, 0.0, 1.0)), 0.0), uSpecPower);
+  float maskGate = smoothstep(0.4, 0.9, mask); // avoid applying at thin/edge mask
+  float spec = min(specRaw * uSpec * maskGate, uSpecClamp);
 
-  vec3 c = mix(espresso, milkCol, clamp(mask, 0.0, 1.0));
+  // Milk shading
+  vec3 milkCol = uMilk * (0.7 + 0.3 * diff) + vec3(spec);
+  milkCol = clamp(milkCol, 0.0, 1.0);
+
+  vec3 c = mix(espresso, milkCol, maskAlpha);
+  c = clamp(c, 0.0, 1.0);
   gl_FragColor = vec4(c, 1.0);
 }
 `
@@ -398,7 +413,7 @@ export const GLScreen = () => {
     pourStartTimeRef.current = Date.now()
     pourIntervalRef.current = setInterval(() => {
       if (touchingRef.current) {
-        const baseVelocity = 5
+        const baseVelocity = 12
         const pressure = touchPressureRef.current || 1.0
         const velocity = baseVelocity * pressure
         const elapsedTime = (Date.now() - pourStartTimeRef.current) / 1000
@@ -437,10 +452,36 @@ export const GLScreen = () => {
     },
     onPanResponderMove: (evt) => {
       if (touchingRef.current) {
-        lastTouchRef.current.x = evt.nativeEvent.locationX / swidth
-        lastTouchRef.current.y = 1.0 - evt.nativeEvent.locationY / sheight
+        const newX = evt.nativeEvent.locationX / swidth
+        const newY = 1.0 - evt.nativeEvent.locationY / sheight
+
+        // Interpolate along movement path to ensure continuous stream
+        const prev = { ...lastTouchRef.current }
+        const dx = newX - prev.x
+        const dy = newY - prev.y
+        const dist = Math.sqrt(dx * dx + dy * dy)
+        const step = 0.01 // normalized UV step spacing
+        const steps = Math.max(1, Math.min(25, Math.ceil(dist / step)))
         const pressure = (evt.nativeEvent as any).force || 1.0
-        touchPressureRef.current = pressure < 0.1 ? 0.1 : pressure > 1.0 ? 1.0 : pressure
+        const p = pressure < 0.1 ? 0.1 : pressure > 1.0 ? 1.0 : pressure
+        const baseVelocity = 5
+        const vy = -baseVelocity * p
+
+        for (let i = 1; i <= steps; i++) {
+          const t = i / steps
+          splatStackRef.current.push({
+            x: prev.x + dx * t,
+            y: prev.y + dy * t,
+            dx: 0,
+            dy: vy,
+            pressure: p,
+            elapsedTime: (Date.now() - pourStartTimeRef.current) / 1000,
+          })
+        }
+
+        lastTouchRef.current.x = newX
+        lastTouchRef.current.y = newY
+        touchPressureRef.current = p
       }
     },
     onPanResponderRelease: () => {
@@ -796,7 +837,9 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
   const milkWhite = { r: 1.0, g: 1.0, b: 1.0 }
 
   function applyInputs() {
-    const maxSplatsPerFrame = 2
+    const qlen = splatStackRef.current?.length ?? 0
+    // Adaptively process more when backlog builds, capped for perf
+    const maxSplatsPerFrame = Math.min(12, Math.max(2, Math.ceil(qlen / 4)))
     let processed = 0
     while ((splatStackRef.current?.length ?? 0) > 0 && processed < maxSplatsPerFrame) {
       const s = splatStackRef.current.shift()
@@ -825,6 +868,10 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     )
     gl.uniform3f(displayProgram.uniforms.uMilk, config.MILK_COLOR.r, config.MILK_COLOR.g, config.MILK_COLOR.b)
     gl.uniform1f(displayProgram.uniforms.uSpec, config.MILK_SPECULAR)
+    gl.uniform1f(displayProgram.uniforms.uSpecPower, config.SPECULAR_POWER)
+    gl.uniform1f(displayProgram.uniforms.uSpecClamp, config.SPECULAR_CLAMP)
+    gl.uniform1f(displayProgram.uniforms.uMilkOpacity, config.MILK_OPACITY)
+    gl.uniform1f(displayProgram.uniforms.uCremaStrength, config.CREMA_STRENGTH)
     gl.uniform1f(displayProgram.uniforms.harden, config.MASK_HARDEN)
     blit(target)
   }
