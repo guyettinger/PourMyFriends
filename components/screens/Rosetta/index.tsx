@@ -2,8 +2,8 @@ import React, { useRef } from 'react'
 import { View, Dimensions, PanResponder } from 'react-native'
 import { GLView } from 'expo-gl'
 
-const swidth = Dimensions.get('screen').width
-const sheight = Dimensions.get('screen').height
+const SCREEN_WIDTH = Dimensions.get('screen').width
+const SCREEN_HEIGHT = Dimensions.get('screen').height
 
 // Configuration for Latte Art Simulator (espresso + frothed milk)
 const config = {
@@ -22,36 +22,17 @@ const config = {
   SPLAT_RADIUS: 1.2, // ~1.2% starting radius
   SPLAT_FORCE: 6000,
 
-  // Visuals
-  SHADING: true,
-  COLORFUL: false,
-  COLOR_UPDATE_SPEED: 10,
-  PAUSED: false,
-  BACK_COLOR: { r: 25, g: 15, b: 8 }, // espresso backdrop
-  TRANSPARENT: false,
-
-  // Post (kept off for realism/perf)
-  BLOOM: false,
-  BLOOM_ITERATIONS: 8,
-  BLOOM_RESOLUTION: 256,
-  BLOOM_INTENSITY: 0.9,
-  BLOOM_THRESHOLD: 0.3,
-  BLOOM_SOFT_KNEE: 0.8,
-  SUNRAYS: false,
-  SUNRAYS_RESOLUTION: 196,
-  SUNRAYS_WEIGHT: 1.0,
-
   // Latte-art specifics
-  USE_MACCORMACK: false, // sharper transport for milk mask
-  BUOYANCY: 0.0, // milk rides to the "top"
+  TRANSPARENT: false,
   MASK_HARDEN: 0.0, // sharpen mask in display compositing
   MILK_SPECULAR: 0.0, // subtle highlight on milk (reduced to avoid blowout)
   SPECULAR_POWER: 32.0, // shininess for spec term
   SPECULAR_CLAMP: 0.06, // clamp spec contribution to avoid white jaggies
   MILK_OPACITY: 0.85, // allow espresso to show through milk a bit
   CREMA_STRENGTH: 0.03, // subtle crema noise strength
-  ESPRESSO_COLOR: { r: 0.10, g: 0.06, b: 0.04 },
+  ESPRESSO_COLOR: { r: 0.1, g: 0.06, b: 0.04 },
   MILK_COLOR: { r: 1.0, g: 0.98, b: 0.95 },
+  PAUSED: false,
 }
 
 // Shaders
@@ -340,66 +321,7 @@ void main () {
 }
 `
 
-// Buoyancy: push velocity upward where there is milk (mask in dye.r)
-const buoyancyShader = `
-precision highp float;
-precision highp sampler2D;
-varying vec2 vUv;
-uniform sampler2D uVelocity;
-uniform sampler2D uMilk;
-uniform float buoyancy;
-uniform float dt;
-void main () {
-  vec2 vel = texture2D(uVelocity, vUv).xy;
-  float m = texture2D(uMilk, vUv).r;
-  vel += vec2(0.0, buoyancy * m) * dt;
-  gl_FragColor = vec4(vel, 0.0, 1.0);
-}
-`
-
-// MacCormack/BFECC correction to keep milk edges crisp
-const macCormackCorrectShader = `
-precision highp float;
-precision highp sampler2D;
-varying vec2 vUv;
-varying vec2 vL;
-varying vec2 vR;
-varying vec2 vT;
-varying vec2 vB;
-uniform sampler2D uPhiN;        // original (before forward advect)
-uniform sampler2D uPhiForward;  // forward advected
-uniform sampler2D uPhiBackward; // back-advected estimate
-uniform float harden;           // [0,1]
-void main () {
-  vec3 phiN = texture2D(uPhiN, vUv).rgb;
-  vec3 phiF = texture2D(uPhiForward, vUv).rgb;
-  vec3 phiB = texture2D(uPhiBackward, vUv).rgb;
-
-  // Correction
-  vec3 corrected = clamp(phiF + 0.5 * (phiN - phiB), 0.0, 1.0);
-
-  // Monotonicity clamp using neighborhood of phiN
-  vec3 mn = phiN;
-  vec3 mx = phiN;
-  vec3 sL = texture2D(uPhiN, vL).rgb;
-  vec3 sR = texture2D(uPhiN, vR).rgb;
-  vec3 sT = texture2D(uPhiN, vT).rgb;
-  vec3 sB = texture2D(uPhiN, vB).rgb;
-  mn = min(mn, sL); mx = max(mx, sL);
-  mn = min(mn, sR); mx = max(mx, sR);
-  mn = min(mn, sT); mx = max(mx, sT);
-  mn = min(mn, sB); mx = max(mx, sB);
-
-  vec3 phiC = clamp(corrected, mn, mx);
-
-  // Optional hardening for crisper edges
-  phiC = mix(phiC, smoothstep(0.0, 1.0, phiC), harden);
-
-  gl_FragColor = vec4(phiC, 1.0);
-}
-`
-
-export const GLScreen = () => {
+export const RosettaScreen = () => {
   const touchingRef = useRef(false)
   const lastTouchRef = useRef({ x: 0, y: 0 })
   const splatStackRef = useRef<any[]>([])
@@ -413,7 +335,7 @@ export const GLScreen = () => {
     pourStartTimeRef.current = Date.now()
     pourIntervalRef.current = setInterval(() => {
       if (touchingRef.current) {
-        const baseVelocity = 12
+        const baseVelocity = 5
         const pressure = touchPressureRef.current || 1.0
         const velocity = baseVelocity * pressure
         const elapsedTime = (Date.now() - pourStartTimeRef.current) / 1000
@@ -426,7 +348,7 @@ export const GLScreen = () => {
           elapsedTime,
         })
       }
-    }, 10)
+    }, 15)
   }
 
   const stopContinuousPouring = () => {
@@ -443,8 +365,8 @@ export const GLScreen = () => {
     onMoveShouldSetPanResponderCapture: () => true,
     onPanResponderGrant: (evt) => {
       touchingRef.current = true
-      const x = evt.nativeEvent.locationX / swidth
-      const y = 1.0 - evt.nativeEvent.locationY / sheight
+      const x = evt.nativeEvent.locationX / SCREEN_WIDTH
+      const y = 1.0 - evt.nativeEvent.locationY / SCREEN_HEIGHT
       lastTouchRef.current = { x, y }
       const pressure = (evt.nativeEvent as any).force || 1.0
       touchPressureRef.current = Math.max(0.1, Math.min(1.0, pressure))
@@ -452,15 +374,15 @@ export const GLScreen = () => {
     },
     onPanResponderMove: (evt) => {
       if (touchingRef.current) {
-        const newX = evt.nativeEvent.locationX / swidth
-        const newY = 1.0 - evt.nativeEvent.locationY / sheight
+        const newX = evt.nativeEvent.locationX / SCREEN_WIDTH
+        const newY = 1.0 - evt.nativeEvent.locationY / SCREEN_HEIGHT
 
         // Interpolate along movement path to ensure continuous stream
         const prev = { ...lastTouchRef.current }
         const dx = newX - prev.x
         const dy = newY - prev.y
         const dist = Math.sqrt(dx * dx + dy * dy)
-        const step = 0.01 // normalized UV step spacing
+        const step = 0.005 // normalized UV step spacing
         const steps = Math.max(1, Math.min(25, Math.ceil(dist / step)))
         const pressure = (evt.nativeEvent as any).force || 1.0
         const p = pressure < 0.1 ? 0.1 : pressure > 1.0 ? 1.0 : pressure
@@ -494,7 +416,7 @@ export const GLScreen = () => {
   return (
     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgb(25, 15, 8)' }}>
       <GLView
-        style={{ width: swidth, height: sheight }}
+        style={{ width: SCREEN_WIDTH, height: SCREEN_HEIGHT }}
         onContextCreate={(gl) => onContextCreate(gl, splatStackRef)}
         {...panResponder.panHandlers}
       />
@@ -590,9 +512,6 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
 
   if (!ext.supportLinearFiltering) {
     config.DYE_RESOLUTION = 512
-    config.SHADING = false
-    config.BLOOM = false
-    config.SUNRAYS = false
   }
 
   // Shader compile/link helpers
@@ -608,7 +527,9 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
   function addKeywords(source: string, keywords: string[] | null) {
     if (keywords == null) return source
     let keywordsString = ''
-    keywords.forEach((k) => { keywordsString += '#define ' + k + '\n' })
+    keywords.forEach((k) => {
+      keywordsString += '#define ' + k + '\n'
+    })
     return keywordsString + source
   }
 
@@ -635,10 +556,10 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
   }
 
   class Program {
-    uniforms: any[]
+    uniforms: any
     program: WebGLProgram
     constructor(vertexShader: WebGLShader, fragmentShader: WebGLShader) {
-      this.uniforms = []
+      this.uniforms = {}
       this.program = createProgram(vertexShader, fragmentShader)
       this.uniforms = getUniforms(this.program)
     }
@@ -664,8 +585,6 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     advectionShader,
     ext.supportLinearFiltering ? null : ['MANUAL_FILTERING'],
   )
-  const buoyancyFrag = compileShader(gl.FRAGMENT_SHADER, buoyancyShader, ['buoyancyFrag'])
-  const macCormackCorrectFrag = compileShader(gl.FRAGMENT_SHADER, macCormackCorrectShader, ['mccFrag'])
 
   // Create programs
   const copyProgram = new Program(baseVertex, copyFrag)
@@ -679,8 +598,6 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
   const pressureProgram = new Program(baseVertex, pressureFrag)
   const gradientSubtractProgram = new Program(baseVertex, gradientFrag)
   const advectionProgram = new Program(baseVertex, advectionFrag)
-  const buoyancyProgram = new Program(baseVertex, buoyancyFrag)
-  const macCormackCorrectProgram = new Program(baseVertex, macCormackCorrectFrag)
 
   // Fullscreen triangle/quad blit
   const blit = (() => {
@@ -812,13 +729,20 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
   }
 
   // Simulation splat: velocity (add) + milk mask (saturate)
-  function splat(x: number, y: number, dx: number, dy: number, color: { r: number; g: number; b: number }, customRadiusPct?: number) {
+  function splat(
+    x: number,
+    y: number,
+    dx: number,
+    dy: number,
+    color: { r: number; g: number; b: number },
+    customRadiusPct?: number,
+  ) {
     const radius = (customRadiusPct !== undefined ? customRadiusPct : config.SPLAT_RADIUS) / 10000.0
 
     // Inject velocity (additive)
     splatProgram.bind()
     gl.uniform1i(splatProgram.uniforms.uTarget, velocity.read.attach(0))
-    gl.uniform1f(splatProgram.uniforms.aspectRatio, swidth / sheight)
+    gl.uniform1f(splatProgram.uniforms.aspectRatio, SCREEN_WIDTH / SCREEN_HEIGHT)
     gl.uniform2f(splatProgram.uniforms.point, x, y)
     gl.uniform3f(splatProgram.uniforms.color, dx, dy, 0.0)
     gl.uniform1f(splatProgram.uniforms.radius, radius)
@@ -834,8 +758,6 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     dye.swap()
   }
 
-  const milkWhite = { r: 1.0, g: 1.0, b: 1.0 }
-
   function applyInputs() {
     const qlen = splatStackRef.current?.length ?? 0
     // Adaptively process more when backlog builds, capped for perf
@@ -845,7 +767,7 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
       const s = splatStackRef.current.shift()
       // Wider contact patch over time (about 1.2% -> 4%)
       const radiusPct = 1.2 + Math.min(2.8, s.elapsedTime * 2.2)
-      splat(s.x, s.y, s.dx, s.dy, milkWhite, radiusPct)
+      splat(s.x, s.y, s.dx, s.dy, config.MILK_COLOR, radiusPct)
       processed++
     }
   }
@@ -926,15 +848,6 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     blit(velocity.write)
     velocity.swap()
 
-    // Buoyancy: milk rises slightly
-    buoyancyProgram.bind()
-    gl.uniform1i(buoyancyProgram.uniforms.uVelocity, velocity.read.attach(0))
-    gl.uniform1i(buoyancyProgram.uniforms.uMilk, dye.read.attach(1))
-    gl.uniform1f(buoyancyProgram.uniforms.buoyancy, config.BUOYANCY)
-    gl.uniform1f(buoyancyProgram.uniforms.dt, dt)
-    blit(velocity.write)
-    velocity.swap()
-
     // Advect velocity
     advectionProgram.bind()
     gl.uniform2f(advectionProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
@@ -948,48 +861,19 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     blit(velocity.write)
     velocity.swap()
 
-    // Advect milk mask with MacCormack for sharper edges
-    if (config.USE_MACCORMACK) {
-      // Forward step: phi^n -> phi^*
-      if (!ext.supportLinearFiltering)
-        gl.uniform2f(advectionProgram.uniforms.dyeTexelSize, dye.texelSizeX, dye.texelSizeY)
-      gl.uniform1i(advectionProgram.uniforms.uVelocity, velocity.read.attach(0))
-      gl.uniform1i(advectionProgram.uniforms.uSource, dye.read.attach(1))
-      gl.uniform1f(advectionProgram.uniforms.dt, dt)
-      gl.uniform1f(advectionProgram.uniforms.dissipation, 0.0)
-      blit(dyeTemp1)
-
-      // Backward step: phi^* -> phi^(n_est) using -dt
-      gl.uniform1i(advectionProgram.uniforms.uVelocity, velocity.read.attach(0))
-      gl.uniform1i(advectionProgram.uniforms.uSource, dyeTemp1.attach(1))
-      gl.uniform1f(advectionProgram.uniforms.dt, -dt)
-      gl.uniform1f(advectionProgram.uniforms.dissipation, 0.0)
-      blit(dyeTemp2)
-
-      // Correction + clamp
-      macCormackCorrectProgram.bind()
-      gl.uniform2f(macCormackCorrectProgram.uniforms.texelSize, dye.texelSizeX, dye.texelSizeY)
-      gl.uniform1i(macCormackCorrectProgram.uniforms.uPhiN, dye.read.attach(0))
-      gl.uniform1i(macCormackCorrectProgram.uniforms.uPhiForward, dyeTemp1.attach(1))
-      gl.uniform1i(macCormackCorrectProgram.uniforms.uPhiBackward, dyeTemp2.attach(2))
-      gl.uniform1f(macCormackCorrectProgram.uniforms.harden, config.MASK_HARDEN)
-      blit(dye.write)
-      dye.swap()
-    } else {
-      // Fallback simple advection
-      if (!ext.supportLinearFiltering)
-        gl.uniform2f(advectionProgram.uniforms.dyeTexelSize, dye.texelSizeX, dye.texelSizeY)
-      gl.uniform1i(advectionProgram.uniforms.uVelocity, velocity.read.attach(0))
-      gl.uniform1i(advectionProgram.uniforms.uSource, dye.read.attach(1))
-      gl.uniform1f(advectionProgram.uniforms.dt, dt)
-      gl.uniform1f(advectionProgram.uniforms.dissipation, config.DENSITY_DISSIPATION)
-      blit(dye.write)
-      dye.swap()
-    }
+    // Advection
+    if (!ext.supportLinearFiltering)
+      gl.uniform2f(advectionProgram.uniforms.dyeTexelSize, dye.texelSizeX, dye.texelSizeY)
+    gl.uniform1i(advectionProgram.uniforms.uVelocity, velocity.read.attach(0))
+    gl.uniform1i(advectionProgram.uniforms.uSource, dye.read.attach(1))
+    gl.uniform1f(advectionProgram.uniforms.dt, dt)
+    gl.uniform1f(advectionProgram.uniforms.dissipation, config.DENSITY_DISSIPATION)
+    blit(dye.write)
+    dye.swap()
   }
 
   function render(target: any) {
-    if (!config.TRANSPARENT) drawColor(target, normalizeColor(config.BACK_COLOR))
+    if (!config.TRANSPARENT) drawColor(target, normalizeColor(config.ESPRESSO_COLOR))
     drawDisplay(target)
   }
 

@@ -1,6 +1,6 @@
 import { HomeScreen } from 'components/screens/Home'
-import { GLScreen } from '~/components/screens/GL'
+import { RosettaScreen } from '~/components/screens/Rosetta'
 
 export default function Screen() {
-  return <GLScreen />
+  return <RosettaScreen />
 }
