@@ -32,6 +32,7 @@ const config = {
   CREMA_STRENGTH: 0.03, // subtle crema noise strength
   ESPRESSO_COLOR: { r: 0.1, g: 0.06, b: 0.04 },
   MILK_COLOR: { r: 1.0, g: 0.98, b: 0.95 },
+  VALLEY_STRENGTH: 0.2, // how much valleys reveal espresso
   PAUSED: false,
 }
 
@@ -67,56 +68,75 @@ varying vec2 vB;
 uniform sampler2D uTexture; // dye as milk mask (use R)
 uniform vec3 uEspresso;
 uniform vec3 uMilk;
-uniform float uSpec;        // milk specular intensity
-uniform float uSpecPower;   // specular shininess
-uniform float uSpecClamp;   // clamp for spec highlight
-uniform float uMilkOpacity; // milk opacity factor
-uniform float uCremaStrength; // crema noise strength
-uniform float harden;       // mask hardening [0,1]
+uniform float uSpec;
+uniform float uSpecPower;
+uniform float uSpecClamp;
+uniform float uMilkOpacity;
+uniform float uCremaStrength;
+uniform float uValleyStrength;
+uniform float harden;
 uniform vec2 texelSize;
 
-// Tiny procedural noise for crema variation (no texture binding required)
-float hash(vec2 p) {
+float hash(vec2 p){
   p = fract(p * vec2(123.34, 345.45));
   p += dot(p, p + 34.345);
   return fract(p.x * p.y);
 }
 
 void main () {
+  // 4-neighbor
   float m  = texture2D(uTexture, vUv).r;
   float ml = texture2D(uTexture, vL).r;
   float mr = texture2D(uTexture, vR).r;
   float mt = texture2D(uTexture, vT).r;
   float mb = texture2D(uTexture, vB).r;
 
-  // Mask for edges and blend; apply user hardening
-  float mask = mix(m, smoothstep(0.0, 1.0, m), harden);
+  // Diagonals (computed using texelSize to avoid extra varyings)
+  vec2 d = texelSize;
+  float mtl = texture2D(uTexture, vUv + vec2(-d.x,  d.y)).r;
+  float mtr = texture2D(uTexture, vUv + vec2( d.x,  d.y)).r;
+  float mbl = texture2D(uTexture, vUv + vec2(-d.x, -d.y)).r;
+  float mbr = texture2D(uTexture, vUv + vec2( d.x, -d.y)).r;
+
+  // 3x3 tent blur (low-pass) to reduce pixelation
+  float edges = ml + mr + mt + mb;
+  float corners = mtl + mtr + mbl + mbr;
+  float mBlur = (4.0*m + 2.0*edges + corners) / 16.0;
+
+  // 8-neighbor Laplacian on blurred mask (positive => valley)
+  float neighAvg = (edges + corners) / 8.0;
+  float lap = neighAvg - mBlur;
+
+  // Normalize and softly map to [0,1]; threshold scales with resolution
+  float k = 0.75 * length(texelSize);   // larger k = smoother, less blocky
+  float valley = smoothstep(0.0, k, max(0.0, lap));
+
+  // Base mask (optionally hardened)
+  float mask = mix(mBlur, smoothstep(0.0, 1.0, mBlur), harden);
   float maskAlpha = clamp(mask * uMilkOpacity, 0.0, 1.0);
 
-  // Normal from mask gradient for milky highlight
+  // Thin milk in valleys so espresso shows through
+  maskAlpha *= (1.0 - uValleyStrength * valley);
+
+  // Lighting from gradient of blurred mask
   float dx = mr - ml;
   float dy = mt - mb;
   vec3 n = normalize(vec3(dx, dy, length(texelSize)));
-
   vec3 lightDir = normalize(vec3(0.0, 0.0, 1.0));
   float diff = clamp(dot(n, lightDir), 0.0, 1.0);
 
-  // Espresso base with subtle crema noise (show more where milk is thinner)
+  // Espresso with crema stronger where milk is thin
   float crema = 1.0 + (hash(vUv * 1024.0) * 2.0 - 1.0) * uCremaStrength * (1.0 - maskAlpha);
   vec3 espresso = uEspresso * crema;
 
-  // Specular: softened, gated by mask to avoid edge jaggies and clamped to avoid white blowout
+  // Specular reduced in valleys to avoid white seams
   float specRaw = pow(max(dot(reflect(-lightDir, n), vec3(0.0, 0.0, 1.0)), 0.0), uSpecPower);
-  float maskGate = smoothstep(0.4, 0.9, mask); // avoid applying at thin/edge mask
-  float spec = min(specRaw * uSpec * maskGate, uSpecClamp);
+  float maskGate = smoothstep(0.3, 0.9, mask);
+  float spec = min(specRaw * uSpec * maskGate, uSpecClamp) * (1.0 - valley);
 
-  // Milk shading
-  vec3 milkCol = uMilk * (0.7 + 0.3 * diff) + vec3(spec);
-  milkCol = clamp(milkCol, 0.0, 1.0);
-
-  vec3 c = mix(espresso, milkCol, maskAlpha);
-  c = clamp(c, 0.0, 1.0);
-  gl_FragColor = vec4(c, 1.0);
+  vec3 milkCol = uMilk * (0.8 + 0.2 * diff) + vec3(spec);
+  vec3 c = mix(espresso, clamp(milkCol, 0.0, 1.0), maskAlpha);
+  gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }
 `
 
@@ -795,6 +815,8 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     gl.uniform1f(displayProgram.uniforms.uMilkOpacity, config.MILK_OPACITY)
     gl.uniform1f(displayProgram.uniforms.uCremaStrength, config.CREMA_STRENGTH)
     gl.uniform1f(displayProgram.uniforms.harden, config.MASK_HARDEN)
+    gl.uniform1f(displayProgram.uniforms.uValleyStrength, config.VALLEY_STRENGTH)
+
     blit(target)
   }
 
