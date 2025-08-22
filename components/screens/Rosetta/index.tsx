@@ -2,10 +2,35 @@ import React, { useRef } from 'react'
 import { View, Dimensions, PanResponder } from 'react-native'
 import { GLView } from 'expo-gl'
 
+/*
+Latte Art Rosetta Simulator (Expo + WebGL)
+
+Overview
+- Simulates a simplified 2D fluid field (velocity/pressure) and a dye buffer representing frothed milk.
+- The user pours by touching/draging; we inject velocity and deposit a milk mask via splats.
+- A display shader composites milk over espresso, revealing espresso in “valleys” (thin milk) with subtle lighting and crema noise.
+
+Goals
+- Realistic layered look (milk/espresso separation) without heavy compute cost.
+- Stable, responsive pouring interactions and smooth edges (reduced pixelation).
+- Portable WebGL pipeline (ES 2.0 compatible) for Expo/React Native.
+
+Pipeline
+1) Velocity update: curl -> vorticity confinement -> divergence -> pressure solve -> gradient subtract -> advection.
+2) Dye (milk) advection by the velocity field; dye has zero dissipation (milk persists).
+3) Display: tent-filter the milk mask, estimate valleys using a Laplacian, thin milk in valleys, add gentle specular and crema modulation.
+
+Notes on sharpness vs realism
+- Pixelation often comes from aggressive valley reveal thresholds and hard masks.
+- We use a small tent blur and a softened valley threshold (k) to reduce blockiness while keeping crisp rosetta edges.
+*/
+
 const SCREEN_WIDTH = Dimensions.get('screen').width
 const SCREEN_HEIGHT = Dimensions.get('screen').height
 
 // Configuration for Latte Art Simulator (espresso + frothed milk)
+// Global configuration for the latte art simulator.
+// Adjust these to balance realism, sharpness, and performance.
 const config = {
   SIM_RESOLUTION: 512,
   DYE_RESOLUTION: 1024,
@@ -19,21 +44,29 @@ const config = {
   CURL: 0, // gentle roll for leaf edges
 
   // Pour tuning (percent of screen width/height in splat())
-  SPLAT_RADIUS: 1.2, // ~1.2% starting radius
-  SPLAT_FORCE: 6000,
+  SPLAT_RADIUS: 1.2, // ~1.2% starting radius; widened over time in applyInputs()
+  SPLAT_FORCE: 1000,
 
   // Latte-art specifics
   TRANSPARENT: false,
-  MASK_HARDEN: 0.0, // sharpen mask in display compositing
+  MASK_HARDEN: 0.0, // sharpen mask in display compositing (keep 0 for smoother edges)
   MILK_SPECULAR: 0.0, // subtle highlight on milk (reduced to avoid blowout)
   SPECULAR_POWER: 32.0, // shininess for spec term
   SPECULAR_CLAMP: 0.06, // clamp spec contribution to avoid white jaggies
-  MILK_OPACITY: 0.85, // allow espresso to show through milk a bit
-  CREMA_STRENGTH: 0.03, // subtle crema noise strength
+  MILK_OPACITY: 0.95, // allow espresso to show through milk a bit
+  CREMA_STRENGTH: 0.02, // slightly reduced crema noise to avoid salt-and-pepper look
   ESPRESSO_COLOR: { r: 0.1, g: 0.06, b: 0.04 },
   MILK_COLOR: { r: 1.0, g: 0.98, b: 0.95 },
-  VALLEY_STRENGTH: 0.2, // how much valleys reveal espresso
+  VALLEY_STRENGTH: 0.0, // softened further to reduce pixelation in shallow valleys
   PAUSED: false,
+
+  // Cel shading (final stage)
+  CELL_ENABLED: true,
+  CELL_LEVELS: 256, // number of color bands for quantization
+  CELL_EDGE_STRENGTH: 0.01, // darkness of outlines
+  CELL_EDGE_THRESHOLD: 0.5, // sensitivity for edge detection
+  CELL_EDGE_COLOR: { r: 0.05, g: 0.03, b: 0.02 }, // a deep espresso-brown outline
+  CELL_RAMP_GAMMA: 0.06, // <1.0 biases ramp toward espresso faster
 }
 
 // Shaders
@@ -57,6 +90,10 @@ void main () {
 `
 
 // Display: composite milk mask over espresso with gentle lighting
+// Anti-pixelation measures:
+// - 3x3 tent blur of the milk mask to reduce blockiness without losing edge definition
+// - Resolution-scaled valley threshold (k) for stable reveal across devices
+// - Specular clamped and gated by mask to avoid bright jaggies along seams
 const displayShader = `
 precision highp float;
 precision highp sampler2D;
@@ -90,53 +127,125 @@ void main () {
   float mr = texture2D(uTexture, vR).r;
   float mt = texture2D(uTexture, vT).r;
   float mb = texture2D(uTexture, vB).r;
-
+  
   // Diagonals (computed using texelSize to avoid extra varyings)
   vec2 d = texelSize;
   float mtl = texture2D(uTexture, vUv + vec2(-d.x,  d.y)).r;
   float mtr = texture2D(uTexture, vUv + vec2( d.x,  d.y)).r;
   float mbl = texture2D(uTexture, vUv + vec2(-d.x, -d.y)).r;
   float mbr = texture2D(uTexture, vUv + vec2( d.x, -d.y)).r;
-
+  
   // 3x3 tent blur (low-pass) to reduce pixelation
   float edges = ml + mr + mt + mb;
   float corners = mtl + mtr + mbl + mbr;
   float mBlur = (4.0*m + 2.0*edges + corners) / 16.0;
-
+  
   // 8-neighbor Laplacian on blurred mask (positive => valley)
   float neighAvg = (edges + corners) / 8.0;
   float lap = neighAvg - mBlur;
-
+  
   // Normalize and softly map to [0,1]; threshold scales with resolution
-  float k = 0.75 * length(texelSize);   // larger k = smoother, less blocky
-  float valley = smoothstep(0.0, k, max(0.0, lap));
-
+  float k = 1.10 * length(texelSize);   // larger k = smoother, less blocky; slightly increased to reduce pixelation
+  float lapPos = max(0.0, lap);
+  // Exponential mapping reduces quantization in low-lap areas (less pixelation in shallow valleys)
+  float valley = 1.0 - exp(-lapPos / (k + 1e-6));
+  valley = pow(valley, 0.85);
+  
   // Base mask (optionally hardened)
   float mask = mix(mBlur, smoothstep(0.0, 1.0, mBlur), harden);
   float maskAlpha = clamp(mask * uMilkOpacity, 0.0, 1.0);
-
+  
   // Thin milk in valleys so espresso shows through
   maskAlpha *= (1.0 - uValleyStrength * valley);
-
+  
   // Lighting from gradient of blurred mask
   float dx = mr - ml;
   float dy = mt - mb;
   vec3 n = normalize(vec3(dx, dy, length(texelSize)));
   vec3 lightDir = normalize(vec3(0.0, 0.0, 1.0));
   float diff = clamp(dot(n, lightDir), 0.0, 1.0);
-
+  
   // Espresso with crema stronger where milk is thin
   float crema = 1.0 + (hash(vUv * 1024.0) * 2.0 - 1.0) * uCremaStrength * (1.0 - maskAlpha);
   vec3 espresso = uEspresso * crema;
-
+  
   // Specular reduced in valleys to avoid white seams
   float specRaw = pow(max(dot(reflect(-lightDir, n), vec3(0.0, 0.0, 1.0)), 0.0), uSpecPower);
   float maskGate = smoothstep(0.3, 0.9, mask);
   float spec = min(specRaw * uSpec * maskGate, uSpecClamp) * (1.0 - valley);
-
+  
   vec3 milkCol = uMilk * (0.8 + 0.2 * diff) + vec3(spec);
   vec3 c = mix(espresso, clamp(milkCol, 0.0, 1.0), maskAlpha);
   gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+}
+`
+
+// Cel shading post-process (final stage): quantize colors and add outlines
+const cellShader = `
+precision highp float;
+precision highp sampler2D;
+varying vec2 vUv;
+varying vec2 vL;
+varying vec2 vR;
+varying vec2 vT;
+varying vec2 vB;
+uniform sampler2D uTexture; // input composed scene
+uniform float uLevels;
+uniform float uEdgeThreshold;
+uniform float uEdgeStrength;
+uniform vec3 uEdgeColor;
+uniform vec3 uMilkColor;
+uniform vec3 uEspressoColor;
+uniform vec2 texelSize;
+
+float luminance(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
+
+void main(){
+  vec3 cC = texture2D(uTexture, vUv).rgb;
+  vec3 cL = texture2D(uTexture, vL).rgb;
+  vec3 cR = texture2D(uTexture, vR).rgb;
+  vec3 cT = texture2D(uTexture, vT).rgb;
+  vec3 cB = texture2D(uTexture, vB).rgb;
+
+  vec2 d = texelSize;
+  vec3 cTL = texture2D(uTexture, vUv + vec2(-d.x,  d.y)).rgb;
+  vec3 cTR = texture2D(uTexture, vUv + vec2( d.x,  d.y)).rgb;
+  vec3 cBL = texture2D(uTexture, vUv + vec2(-d.x, -d.y)).rgb;
+  vec3 cBR = texture2D(uTexture, vUv + vec2( d.x, -d.y)).rgb;
+
+  // Sobel on luminance for edges
+  float lC = luminance(cC);
+  float lL = luminance(cL);
+  float lR = luminance(cR);
+  float lT = luminance(cT);
+  float lB = luminance(cB);
+  float lTL = luminance(cTL);
+  float lTR = luminance(cTR);
+  float lBL = luminance(cBL);
+  float lBR = luminance(cBR);
+
+  float gx = -lTL - 2.0*lL - lBL + lTR + 2.0*lR + lBR;
+  float gy = -lTL - 2.0*lT - lTR + lBL + 2.0*lB + lBR;
+  float edge = length(vec2(gx, gy));
+
+  // Slight pre-blur of luminance to reduce jagged cell borders
+  float lBlur = (lC * 4.0 + (lL + lR + lT + lB) * 2.0 + (lTL + lTR + lBL + lBR)) / 16.0;
+
+  // Map luminance to espresso-amount t (0 = milk, 1 = espresso)
+  float t = clamp(1.0 - lBlur, 0.0, 1.0);
+
+  // Quantize t into discrete levels along milk->espresso ramp
+  float levels = max(2.0, uLevels);
+  float tQ = floor(t * (levels - 1.0) + 0.5) / (levels - 1.0);
+  vec3 quant = mix(uMilkColor, uEspressoColor, tQ);
+
+  // Smooth edge mask for outlines
+  float edgeMask = smoothstep(uEdgeThreshold * 0.6, uEdgeThreshold * 2.4, edge);
+
+  // Apply outline by mixing toward edge color (subtle)
+  vec3 outlined = mix(quant, uEdgeColor, clamp(edgeMask * uEdgeStrength, 0.0, 1.0));
+
+  gl_FragColor = vec4(clamp(outlined, 0.0, 1.0), 1.0);
 }
 `
 
@@ -594,6 +703,7 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
   const colorFrag = compileShader(gl.FRAGMENT_SHADER, colorShader, ['colorFrag'])
   const splatFrag = compileShader(gl.FRAGMENT_SHADER, splatShader, ['splatFrag'])
   const displayFrag = compileShader(gl.FRAGMENT_SHADER, displayShader, ['displayFrag'])
+  const cellFrag = compileShader(gl.FRAGMENT_SHADER, cellShader, ['cellFrag'])
   const curlFrag = compileShader(gl.FRAGMENT_SHADER, curlShader, ['curlFrag'])
   const vorticityFrag = compileShader(gl.FRAGMENT_SHADER, vorticityShader, ['vorticityFrag'])
   const divergenceFrag = compileShader(gl.FRAGMENT_SHADER, divergenceShader, ['divergenceFrag'])
@@ -611,6 +721,7 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
   const colorProgram = new Program(baseVertex, colorFrag)
   const splatProgram = new Program(baseVertex, splatFrag)
   const displayProgram = new Program(baseVertex, displayFrag)
+  const cellProgram = new Program(baseVertex, cellFrag)
   const curlProgram = new Program(baseVertex, curlFrag)
   const vorticityProgram = new Program(baseVertex, vorticityFrag)
   const divergenceProgram = new Program(baseVertex, divergenceFrag)
@@ -721,6 +832,7 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
   let curl: any
   let divergence: any
   let pressure: any
+  let scene: any
 
   function initFramebuffers() {
     const simRes = getResolution(gl, config.SIM_RESOLUTION)
@@ -746,9 +858,18 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
       divergence = createFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST)
     if (pressure == null)
       pressure = createDoubleFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST)
+
+    // Scene FBO matching screen size for post-processing (cel shading)
+    if (scene == null) {
+      const w = gl.drawingBufferWidth
+      const h = gl.drawingBufferHeight
+      scene = createFBO(w, h, rgba.internalFormat, rgba.format, texType, filtering)
+    }
   }
 
-  // Simulation splat: velocity (add) + milk mask (saturate)
+  // Simulation splat: injects momentum (additive) and deposits milk mask (saturating toward white).
+  // - Velocity path keeps fluid motion lively.
+  // - Milk mask uses a saturating blend to avoid transparent “holes” and maintain a creamy look.
   function splat(
     x: number,
     y: number,
@@ -778,6 +899,9 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     dye.swap()
   }
 
+  // Apply pending input splats from the queue.
+  // This function keeps responsiveness high by adapting the number of processed
+  // splats per frame to the current backlog, with an upper bound for performance.
   function applyInputs() {
     const qlen = splatStackRef.current?.length ?? 0
     // Adaptively process more when backlog builds, capped for perf
@@ -785,7 +909,8 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     let processed = 0
     while ((splatStackRef.current?.length ?? 0) > 0 && processed < maxSplatsPerFrame) {
       const s = splatStackRef.current.shift()
-      // Wider contact patch over time (about 1.2% -> 4%)
+      // Wider contact patch over time to emulate a pitcher lowering toward the surface.
+      // Starts ~1.2% of min dimension and widens to ~4%.
       const radiusPct = 1.2 + Math.min(2.8, s.elapsedTime * 2.2)
       splat(s.x, s.y, s.dx, s.dy, config.MILK_COLOR, radiusPct)
       processed++
@@ -798,10 +923,11 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     blit(target)
   }
 
+  // Composite dye (milk mask) over espresso with lighting and valley-driven reveal.
   function drawDisplay(target: any) {
     displayProgram.bind()
     gl.uniform1i(displayProgram.uniforms.uTexture, dye.read.attach(0))
-    gl.uniform2f(displayProgram.uniforms.texelSize, dye.texelSizeX, dye.texelSizeY)
+    // We'll rely on matching source/target sizes; blit sets texelSize for neighbors.
     gl.uniform3f(
       displayProgram.uniforms.uEspresso,
       config.ESPRESSO_COLOR.r,
@@ -815,8 +941,43 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     gl.uniform1f(displayProgram.uniforms.uMilkOpacity, config.MILK_OPACITY)
     gl.uniform1f(displayProgram.uniforms.uCremaStrength, config.CREMA_STRENGTH)
     gl.uniform1f(displayProgram.uniforms.harden, config.MASK_HARDEN)
+    // Lower uValleyStrength reduces pixelation by softening espresso reveal in thin regions.
     gl.uniform1f(displayProgram.uniforms.uValleyStrength, config.VALLEY_STRENGTH)
 
+    blit(target)
+  }
+
+  function drawCell(target: any) {
+    cellProgram.bind()
+    gl.uniform1i(cellProgram.uniforms.uTexture, scene.attach(0))
+    gl.uniform1f(cellProgram.uniforms.uLevels, config.CELL_LEVELS)
+    gl.uniform1f(cellProgram.uniforms.uEdgeThreshold, config.CELL_EDGE_THRESHOLD)
+    gl.uniform1f(cellProgram.uniforms.uEdgeStrength, config.CELL_EDGE_STRENGTH)
+    gl.uniform3f(
+      cellProgram.uniforms.uEdgeColor,
+      config.CELL_EDGE_COLOR.r,
+      config.CELL_EDGE_COLOR.g,
+      config.CELL_EDGE_COLOR.b,
+    )
+    // Provide milk and espresso ramp colors for stepped shading
+    gl.uniform3f(
+      cellProgram.uniforms.uMilkColor,
+      config.MILK_COLOR.r,
+      config.MILK_COLOR.g,
+      config.MILK_COLOR.b,
+    )
+    gl.uniform3f(
+      cellProgram.uniforms.uEspressoColor,
+      config.ESPRESSO_COLOR.r,
+      config.ESPRESSO_COLOR.g,
+      config.ESPRESSO_COLOR.b,
+    )
+    blit(target)
+  }
+
+  function drawCopy(target: any, source: any) {
+    copyProgram.bind()
+    gl.uniform1i(copyProgram.uniforms.uTexture, source.attach(0))
     blit(target)
   }
 
@@ -895,8 +1056,16 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
   }
 
   function render(target: any) {
-    if (!config.TRANSPARENT) drawColor(target, normalizeColor(config.ESPRESSO_COLOR))
-    drawDisplay(target)
+    // Render scene to offscreen FBO matching screen size
+    if (!config.TRANSPARENT) drawColor(scene, normalizeColor(config.ESPRESSO_COLOR))
+    drawDisplay(scene)
+
+    // Final stage: cel shader to screen (or copy if disabled)
+    if (config.CELL_ENABLED) {
+      drawCell(target)
+    } else {
+      drawCopy(target, scene)
+    }
   }
 
   // Init
