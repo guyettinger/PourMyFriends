@@ -51,7 +51,7 @@ const config = {
   TRANSPARENT: false,
   MASK_HARDEN: 0.0, // sharpen mask in display compositing (keep 0 for smoother edges)
   MILK_SPECULAR: 0.0, // subtle highlight on milk (reduced to avoid blowout)
-  SPECULAR_POWER: 32.0, // shininess for spec term
+  SPECULAR_POWER: 16.0, // shininess for spec term
   SPECULAR_CLAMP: 0.06, // clamp spec contribution to avoid white jaggies
   MILK_OPACITY: 0.95, // allow espresso to show through milk a bit
   CREMA_STRENGTH: 0.02, // slightly reduced crema noise to avoid salt-and-pepper look
@@ -61,12 +61,12 @@ const config = {
   PAUSED: false,
 
   // Cel shading (final stage)
-  CELL_ENABLED: true,
+  CELL_ENABLED: false,
   CELL_LEVELS: 256, // number of color bands for quantization
   CELL_EDGE_STRENGTH: 0.01, // darkness of outlines
   CELL_EDGE_THRESHOLD: 0.5, // sensitivity for edge detection
   CELL_EDGE_COLOR: { r: 0.05, g: 0.03, b: 0.02 }, // a deep espresso-brown outline
-  CELL_RAMP_GAMMA: 0.06, // <1.0 biases ramp toward espresso faster
+  CELL_RAMP_GAMMA: 0.4, // <1.0 biases ramp toward espresso faster
 }
 
 // Shaders
@@ -145,18 +145,18 @@ void main () {
   float lap = neighAvg - mBlur;
   
   // Normalize and softly map to [0,1]; threshold scales with resolution
-  float k = 1.10 * length(texelSize);   // larger k = smoother, less blocky; slightly increased to reduce pixelation
+  float k = 0.65 * length(texelSize);   // larger k = smoother, less blocky; slightly increased to reduce pixelation
   float lapPos = max(0.0, lap);
   // Exponential mapping reduces quantization in low-lap areas (less pixelation in shallow valleys)
   float valley = 1.0 - exp(-lapPos / (k + 1e-6));
-  valley = pow(valley, 0.85);
+  valley = pow(valley, 0.6);
   
   // Base mask (optionally hardened)
   float mask = mix(mBlur, smoothstep(0.0, 1.0, mBlur), harden);
   float maskAlpha = clamp(mask * uMilkOpacity, 0.0, 1.0);
   
   // Thin milk in valleys so espresso shows through
-  maskAlpha *= (1.0 - uValleyStrength * valley);
+  maskAlpha *= max(0.0, maskAlpha - uValleyStrength * valley); // subtractive mode feels sharper in valleys
   
   // Lighting from gradient of blurred mask
   float dx = mr - ml;
@@ -196,6 +196,7 @@ uniform float uEdgeStrength;
 uniform vec3 uEdgeColor;
 uniform vec3 uMilkColor;
 uniform vec3 uEspressoColor;
+uniform float uRampGamma;
 uniform vec2 texelSize;
 
 float luminance(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
@@ -234,9 +235,12 @@ void main(){
   // Map luminance to espresso-amount t (0 = milk, 1 = espresso)
   float t = clamp(1.0 - lBlur, 0.0, 1.0);
 
+  // Apply ramp gamma to push toward espresso faster when gamma < 1.0
+  float tB = pow(t, max(0.0001, uRampGamma));
+
   // Quantize t into discrete levels along milk->espresso ramp
   float levels = max(2.0, uLevels);
-  float tQ = floor(t * (levels - 1.0) + 0.5) / (levels - 1.0);
+  float tQ = floor(tB * (levels - 1.0) + 0.5) / (levels - 1.0);
   vec3 quant = mix(uMilkColor, uEspressoColor, tQ);
 
   // Smooth edge mask for outlines
@@ -972,6 +976,8 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
       config.ESPRESSO_COLOR.g,
       config.ESPRESSO_COLOR.b,
     )
+    const rampGamma = (config as any).CELL_RAMP_GAMMA ?? 1.0
+    gl.uniform1f(cellProgram.uniforms.uRampGamma, rampGamma)
     blit(target)
   }
 
