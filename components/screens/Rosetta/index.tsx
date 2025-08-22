@@ -52,10 +52,10 @@ const config = {
   MASK_HARDEN: 0.0, // sharpen mask in display compositing (keep 0 for smoother edges)
   MILK_SPECULAR: 0.0, // subtle highlight on milk (reduced to avoid blowout)
   SPECULAR_POWER: 16.0, // shininess for spec term
-  SPECULAR_CLAMP: 0.06, // clamp spec contribution to avoid white jaggies
+  SPECULAR_CLAMP: 0.0, // clamp spec contribution to avoid white jaggies
   MILK_OPACITY: 0.95, // allow espresso to show through milk a bit
-  CREMA_STRENGTH: 0.02, // slightly reduced crema noise to avoid salt-and-pepper look
-  ESPRESSO_COLOR: { r: 0.1, g: 0.06, b: 0.04 },
+  CREMA_STRENGTH: 0.0, // slightly reduced crema noise to avoid salt-and-pepper look
+  ESPRESSO_COLOR: { r: 0.09, g: 0.04, b: 0.02 },
   MILK_COLOR: { r: 1.0, g: 0.98, b: 0.95 },
   VALLEY_STRENGTH: 0.0, // softened further to reduce pixelation in shallow valleys
   PAUSED: false,
