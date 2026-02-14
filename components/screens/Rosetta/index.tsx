@@ -60,13 +60,6 @@ const config = {
   VALLEY_STRENGTH: 0.0, // softened further to reduce pixelation in shallow valleys
   PAUSED: false,
 
-  // Cel shading (final stage)
-  CELL_ENABLED: false,
-  CELL_LEVELS: 256, // number of color bands for quantization
-  CELL_EDGE_STRENGTH: 0.01, // darkness of outlines
-  CELL_EDGE_THRESHOLD: 0.5, // sensitivity for edge detection
-  CELL_EDGE_COLOR: { r: 0.05, g: 0.03, b: 0.02 }, // a deep espresso-brown outline
-  CELL_RAMP_GAMMA: 0.4, // <1.0 biases ramp toward espresso faster
 }
 
 // Shaders
@@ -105,20 +98,8 @@ varying vec2 vB;
 uniform sampler2D uTexture; // dye as milk mask (use R)
 uniform vec3 uEspresso;
 uniform vec3 uMilk;
-uniform float uSpec;
-uniform float uSpecPower;
-uniform float uSpecClamp;
 uniform float uMilkOpacity;
-uniform float uCremaStrength;
-uniform float uValleyStrength;
-uniform float harden;
 uniform vec2 texelSize;
-
-float hash(vec2 p){
-  p = fract(p * vec2(123.34, 345.45));
-  p += dot(p, p + 34.345);
-  return fract(p.x * p.y);
-}
 
 void main () {
   // 4-neighbor
@@ -140,23 +121,9 @@ void main () {
   float corners = mtl + mtr + mbl + mbr;
   float mBlur = (4.0*m + 2.0*edges + corners) / 16.0;
   
-  // 8-neighbor Laplacian on blurred mask (positive => valley)
-  float neighAvg = (edges + corners) / 8.0;
-  float lap = neighAvg - mBlur;
-  
-  // Normalize and softly map to [0,1]; threshold scales with resolution
-  float k = 0.65 * length(texelSize);   // larger k = smoother, less blocky; slightly increased to reduce pixelation
-  float lapPos = max(0.0, lap);
-  // Exponential mapping reduces quantization in low-lap areas (less pixelation in shallow valleys)
-  float valley = 1.0 - exp(-lapPos / (k + 1e-6));
-  valley = pow(valley, 0.6);
-  
-  // Base mask (optionally hardened)
-  float mask = mix(mBlur, smoothstep(0.0, 1.0, mBlur), harden);
+  // Base mask (no hardening since config harden==0)
+  float mask = mBlur;
   float maskAlpha = clamp(mask * uMilkOpacity, 0.0, 1.0);
-  
-  // Thin milk in valleys so espresso shows through
-  maskAlpha *= max(0.0, maskAlpha - uValleyStrength * valley); // subtractive mode feels sharper in valleys
   
   // Lighting from gradient of blurred mask
   float dx = mr - ml;
@@ -165,93 +132,16 @@ void main () {
   vec3 lightDir = normalize(vec3(0.0, 0.0, 1.0));
   float diff = clamp(dot(n, lightDir), 0.0, 1.0);
   
-  // Espresso with crema stronger where milk is thin
-  float crema = 1.0 + (hash(vUv * 1024.0) * 2.0 - 1.0) * uCremaStrength * (1.0 - maskAlpha);
-  vec3 espresso = uEspresso * crema;
+  // Espresso base (no crema modulation since crema strength==0)
+  vec3 espresso = uEspresso;
   
-  // Specular reduced in valleys to avoid white seams
-  float specRaw = pow(max(dot(reflect(-lightDir, n), vec3(0.0, 0.0, 1.0)), 0.0), uSpecPower);
-  float maskGate = smoothstep(0.3, 0.9, mask);
-  float spec = min(specRaw * uSpec * maskGate, uSpecClamp) * (1.0 - valley);
-  
-  vec3 milkCol = uMilk * (0.8 + 0.2 * diff) + vec3(spec);
+  // Milk shading without specular (specular==0)
+  vec3 milkCol = uMilk * (0.8 + 0.2 * diff);
   vec3 c = mix(espresso, clamp(milkCol, 0.0, 1.0), maskAlpha);
   gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }
 `
 
-// Cel shading post-process (final stage): quantize colors and add outlines
-const cellShader = `
-precision highp float;
-precision highp sampler2D;
-varying vec2 vUv;
-varying vec2 vL;
-varying vec2 vR;
-varying vec2 vT;
-varying vec2 vB;
-uniform sampler2D uTexture; // input composed scene
-uniform float uLevels;
-uniform float uEdgeThreshold;
-uniform float uEdgeStrength;
-uniform vec3 uEdgeColor;
-uniform vec3 uMilkColor;
-uniform vec3 uEspressoColor;
-uniform float uRampGamma;
-uniform vec2 texelSize;
-
-float luminance(vec3 c){ return dot(c, vec3(0.299, 0.587, 0.114)); }
-
-void main(){
-  vec3 cC = texture2D(uTexture, vUv).rgb;
-  vec3 cL = texture2D(uTexture, vL).rgb;
-  vec3 cR = texture2D(uTexture, vR).rgb;
-  vec3 cT = texture2D(uTexture, vT).rgb;
-  vec3 cB = texture2D(uTexture, vB).rgb;
-
-  vec2 d = texelSize;
-  vec3 cTL = texture2D(uTexture, vUv + vec2(-d.x,  d.y)).rgb;
-  vec3 cTR = texture2D(uTexture, vUv + vec2( d.x,  d.y)).rgb;
-  vec3 cBL = texture2D(uTexture, vUv + vec2(-d.x, -d.y)).rgb;
-  vec3 cBR = texture2D(uTexture, vUv + vec2( d.x, -d.y)).rgb;
-
-  // Sobel on luminance for edges
-  float lC = luminance(cC);
-  float lL = luminance(cL);
-  float lR = luminance(cR);
-  float lT = luminance(cT);
-  float lB = luminance(cB);
-  float lTL = luminance(cTL);
-  float lTR = luminance(cTR);
-  float lBL = luminance(cBL);
-  float lBR = luminance(cBR);
-
-  float gx = -lTL - 2.0*lL - lBL + lTR + 2.0*lR + lBR;
-  float gy = -lTL - 2.0*lT - lTR + lBL + 2.0*lB + lBR;
-  float edge = length(vec2(gx, gy));
-
-  // Slight pre-blur of luminance to reduce jagged cell borders
-  float lBlur = (lC * 4.0 + (lL + lR + lT + lB) * 2.0 + (lTL + lTR + lBL + lBR)) / 16.0;
-
-  // Map luminance to espresso-amount t (0 = milk, 1 = espresso)
-  float t = clamp(1.0 - lBlur, 0.0, 1.0);
-
-  // Apply ramp gamma to push toward espresso faster when gamma < 1.0
-  float tB = pow(t, max(0.0001, uRampGamma));
-
-  // Quantize t into discrete levels along milk->espresso ramp
-  float levels = max(2.0, uLevels);
-  float tQ = floor(tB * (levels - 1.0) + 0.5) / (levels - 1.0);
-  vec3 quant = mix(uMilkColor, uEspressoColor, tQ);
-
-  // Smooth edge mask for outlines
-  float edgeMask = smoothstep(uEdgeThreshold * 0.6, uEdgeThreshold * 2.4, edge);
-
-  // Apply outline by mixing toward edge color (subtle)
-  vec3 outlined = mix(quant, uEdgeColor, clamp(edgeMask * uEdgeStrength, 0.0, 1.0));
-
-  gl_FragColor = vec4(clamp(outlined, 0.0, 1.0), 1.0);
-}
-`
 
 // Splat: supports velocity (add) and milk mask (saturate) modes
 const splatShader = `
@@ -278,15 +168,6 @@ void main () {
 }
 `
 
-const copyShader = `
-precision mediump float;
-precision mediump sampler2D;
-varying highp vec2 vUv;
-uniform sampler2D uTexture;
-void main () {
-  gl_FragColor = texture2D(uTexture, vUv);
-}
-`
 
 const colorShader = `
 precision mediump float;
@@ -519,7 +400,7 @@ export const RosettaScreen = () => {
         const steps = Math.max(1, Math.min(25, Math.ceil(dist / step)))
         const pressure = (evt.nativeEvent as any).force || 1.0
         const p = pressure < 0.1 ? 0.1 : pressure > 1.0 ? 1.0 : pressure
-        const baseVelocity = 5
+        const baseVelocity = 3
         const vy = -baseVelocity * p
 
         for (let i = 1; i <= steps; i++) {
@@ -703,11 +584,9 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
 
   // Compile shaders
   const baseVertex = compileShader(gl.VERTEX_SHADER, baseVertexShader, ['baseVertex'])
-  const copyFrag = compileShader(gl.FRAGMENT_SHADER, copyShader, ['copyFrag'])
   const colorFrag = compileShader(gl.FRAGMENT_SHADER, colorShader, ['colorFrag'])
   const splatFrag = compileShader(gl.FRAGMENT_SHADER, splatShader, ['splatFrag'])
   const displayFrag = compileShader(gl.FRAGMENT_SHADER, displayShader, ['displayFrag'])
-  const cellFrag = compileShader(gl.FRAGMENT_SHADER, cellShader, ['cellFrag'])
   const curlFrag = compileShader(gl.FRAGMENT_SHADER, curlShader, ['curlFrag'])
   const vorticityFrag = compileShader(gl.FRAGMENT_SHADER, vorticityShader, ['vorticityFrag'])
   const divergenceFrag = compileShader(gl.FRAGMENT_SHADER, divergenceShader, ['divergenceFrag'])
@@ -721,11 +600,9 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
   )
 
   // Create programs
-  const copyProgram = new Program(baseVertex, copyFrag)
   const colorProgram = new Program(baseVertex, colorFrag)
   const splatProgram = new Program(baseVertex, splatFrag)
   const displayProgram = new Program(baseVertex, displayFrag)
-  const cellProgram = new Program(baseVertex, cellFrag)
   const curlProgram = new Program(baseVertex, curlFrag)
   const vorticityProgram = new Program(baseVertex, vorticityFrag)
   const divergenceProgram = new Program(baseVertex, divergenceFrag)
@@ -836,7 +713,6 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
   let curl: any
   let divergence: any
   let pressure: any
-  let scene: any
 
   function initFramebuffers() {
     const simRes = getResolution(gl, config.SIM_RESOLUTION)
@@ -857,18 +733,13 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
 
     if (velocity == null)
       velocity = createDoubleFBO(simRes.width, simRes.height, rg.internalFormat, rg.format, texType, filtering)
-    if (curl == null) curl = createFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST)
+    if (config.CURL !== 0 && curl == null)
+      curl = createFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST)
     if (divergence == null)
       divergence = createFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST)
     if (pressure == null)
       pressure = createDoubleFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST)
 
-    // Scene FBO matching screen size for post-processing (cel shading)
-    if (scene == null) {
-      const w = gl.drawingBufferWidth
-      const h = gl.drawingBufferHeight
-      scene = createFBO(w, h, rgba.internalFormat, rgba.format, texType, filtering)
-    }
   }
 
   // Simulation splat: injects momentum (additive) and deposits milk mask (saturating toward white).
@@ -939,72 +810,33 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
       config.ESPRESSO_COLOR.b,
     )
     gl.uniform3f(displayProgram.uniforms.uMilk, config.MILK_COLOR.r, config.MILK_COLOR.g, config.MILK_COLOR.b)
-    gl.uniform1f(displayProgram.uniforms.uSpec, config.MILK_SPECULAR)
-    gl.uniform1f(displayProgram.uniforms.uSpecPower, config.SPECULAR_POWER)
-    gl.uniform1f(displayProgram.uniforms.uSpecClamp, config.SPECULAR_CLAMP)
     gl.uniform1f(displayProgram.uniforms.uMilkOpacity, config.MILK_OPACITY)
-    gl.uniform1f(displayProgram.uniforms.uCremaStrength, config.CREMA_STRENGTH)
-    gl.uniform1f(displayProgram.uniforms.harden, config.MASK_HARDEN)
-    // Lower uValleyStrength reduces pixelation by softening espresso reveal in thin regions.
-    gl.uniform1f(displayProgram.uniforms.uValleyStrength, config.VALLEY_STRENGTH)
 
     blit(target)
   }
 
-  function drawCell(target: any) {
-    cellProgram.bind()
-    gl.uniform1i(cellProgram.uniforms.uTexture, scene.attach(0))
-    gl.uniform1f(cellProgram.uniforms.uLevels, config.CELL_LEVELS)
-    gl.uniform1f(cellProgram.uniforms.uEdgeThreshold, config.CELL_EDGE_THRESHOLD)
-    gl.uniform1f(cellProgram.uniforms.uEdgeStrength, config.CELL_EDGE_STRENGTH)
-    gl.uniform3f(
-      cellProgram.uniforms.uEdgeColor,
-      config.CELL_EDGE_COLOR.r,
-      config.CELL_EDGE_COLOR.g,
-      config.CELL_EDGE_COLOR.b,
-    )
-    // Provide milk and espresso ramp colors for stepped shading
-    gl.uniform3f(
-      cellProgram.uniforms.uMilkColor,
-      config.MILK_COLOR.r,
-      config.MILK_COLOR.g,
-      config.MILK_COLOR.b,
-    )
-    gl.uniform3f(
-      cellProgram.uniforms.uEspressoColor,
-      config.ESPRESSO_COLOR.r,
-      config.ESPRESSO_COLOR.g,
-      config.ESPRESSO_COLOR.b,
-    )
-    const rampGamma = (config as any).CELL_RAMP_GAMMA ?? 1.0
-    gl.uniform1f(cellProgram.uniforms.uRampGamma, rampGamma)
-    blit(target)
-  }
 
-  function drawCopy(target: any, source: any) {
-    copyProgram.bind()
-    gl.uniform1i(copyProgram.uniforms.uTexture, source.attach(0))
-    blit(target)
-  }
 
   function step(dt: number) {
     gl.disable(gl.BLEND)
 
-    // Curl
-    curlProgram.bind()
-    gl.uniform2f(curlProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
-    gl.uniform1i(curlProgram.uniforms.uVelocity, velocity.read.attach(0))
-    blit(curl)
+    if (config.CURL !== 0) {
+      // Curl
+      curlProgram.bind()
+      gl.uniform2f(curlProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
+      gl.uniform1i(curlProgram.uniforms.uVelocity, velocity.read.attach(0))
+      blit(curl)
 
-    // Vorticity confinement
-    vorticityProgram.bind()
-    gl.uniform2f(vorticityProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
-    gl.uniform1i(vorticityProgram.uniforms.uVelocity, velocity.read.attach(0))
-    gl.uniform1i(vorticityProgram.uniforms.uCurl, curl.attach(1))
-    gl.uniform1f(vorticityProgram.uniforms.curl, config.CURL)
-    gl.uniform1f(vorticityProgram.uniforms.dt, dt)
-    blit(velocity.write)
-    velocity.swap()
+      // Vorticity confinement
+      vorticityProgram.bind()
+      gl.uniform2f(vorticityProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
+      gl.uniform1i(vorticityProgram.uniforms.uVelocity, velocity.read.attach(0))
+      gl.uniform1i(vorticityProgram.uniforms.uCurl, curl.attach(1))
+      gl.uniform1f(vorticityProgram.uniforms.curl, config.CURL)
+      gl.uniform1f(vorticityProgram.uniforms.dt, dt)
+      blit(velocity.write)
+      velocity.swap()
+    }
 
     // Divergence
     divergenceProgram.bind()
@@ -1062,16 +894,9 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
   }
 
   function render(target: any) {
-    // Render scene to offscreen FBO matching screen size
-    if (!config.TRANSPARENT) drawColor(scene, normalizeColor(config.ESPRESSO_COLOR))
-    drawDisplay(scene)
-
-    // Final stage: cel shader to screen (or copy if disabled)
-    if (config.CELL_ENABLED) {
-      drawCell(target)
-    } else {
-      drawCopy(target, scene)
-    }
+    // Direct render to target (screen)
+    if (!config.TRANSPARENT) drawColor(target, normalizeColor(config.ESPRESSO_COLOR))
+    drawDisplay(target)
   }
 
   // Init
