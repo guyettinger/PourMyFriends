@@ -33,31 +33,31 @@ const SCREEN_HEIGHT = Dimensions.get('screen').height
 // Adjust these to balance realism, sharpness, and performance.
 const config = {
   SIM_RESOLUTION: 512,
-  DYE_RESOLUTION: 1024,
+  DYE_RESOLUTION: 512,
   CAPTURE_RESOLUTION: 1024,
 
   // Fluid tuning
   DENSITY_DISSIPATION: 0, // milk shouldn't fade
   VELOCITY_DISSIPATION: 1, // thicker flow
   PRESSURE: 1,
-  PRESSURE_ITERATIONS: 1, // better incompressibility for smoother motion
+  PRESSURE_ITERATIONS: 4, // better incompressibility for smoother motion
   CURL: 0, // gentle roll for leaf edges
 
   // Pour tuning (percent of screen width/height in splat())
   SPLAT_RADIUS: 1.2, // ~1.2% starting radius; widened over time in applyInputs()
-  SPLAT_FORCE: 1000,
+  SPLAT_FORCE: 150,
 
-  // Latte-art specifics
+  // Latte-art specificsr
   TRANSPARENT: false,
   MASK_HARDEN: 0.0, // sharpen mask in display compositing (keep 0 for smoother edges)
-  MILK_SPECULAR: 0.0, // subtle highlight on milk (reduced to avoid blowout)
-  SPECULAR_POWER: 16.0, // shininess for spec term
+  MILK_SPECULAR: 0.06, // subtle highlight on milk foam
+  SPECULAR_POWER: 32.0, // shininess for spec term
   SPECULAR_CLAMP: 0.0, // clamp spec contribution to avoid white jaggies
   MILK_OPACITY: 0.95, // allow espresso to show through milk a bit
-  CREMA_STRENGTH: 0.0, // slightly reduced crema noise to avoid salt-and-pepper look
+  CREMA_STRENGTH: 0.12, // granular crema on espresso surface
   ESPRESSO_COLOR: { r: 0.09, g: 0.04, b: 0.02 },
   MILK_COLOR: { r: 1.0, g: 0.98, b: 0.95 },
-  VALLEY_STRENGTH: 0.0, // softened further to reduce pixelation in shallow valleys
+  VALLEY_STRENGTH: 0.95, // espresso shows through thin milk
   PAUSED: false,
 
 }
@@ -100,6 +100,14 @@ uniform vec3 uEspresso;
 uniform vec3 uMilk;
 uniform float uMilkOpacity;
 uniform vec2 texelSize;
+uniform float uValleyStrength;
+uniform float uCremaStrength;
+uniform float uMilkSpecular;
+uniform float uSpecularPower;
+
+float hash21(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
 
 void main () {
   // 4-neighbor
@@ -108,35 +116,39 @@ void main () {
   float mr = texture2D(uTexture, vR).r;
   float mt = texture2D(uTexture, vT).r;
   float mb = texture2D(uTexture, vB).r;
-  
+
   // Diagonals (computed using texelSize to avoid extra varyings)
   vec2 d = texelSize;
   float mtl = texture2D(uTexture, vUv + vec2(-d.x,  d.y)).r;
   float mtr = texture2D(uTexture, vUv + vec2( d.x,  d.y)).r;
   float mbl = texture2D(uTexture, vUv + vec2(-d.x, -d.y)).r;
   float mbr = texture2D(uTexture, vUv + vec2( d.x, -d.y)).r;
-  
+
   // 3x3 tent blur (low-pass) to reduce pixelation
   float edges = ml + mr + mt + mb;
   float corners = mtl + mtr + mbl + mbr;
   float mBlur = (4.0*m + 2.0*edges + corners) / 16.0;
-  
-  // Base mask (no hardening since config harden==0)
+
+  // Valley: Laplacian of raw mask (positive at local minima = thin milk pits)
+  float laplacian = ml + mr + mt + mb - 4.0 * m;
+  float valley = clamp(laplacian * uValleyStrength * 10.0, 0.0, 1.0);
   float mask = mBlur;
-  float maskAlpha = clamp(mask * uMilkOpacity, 0.0, 1.0);
-  
+  float maskAlpha = clamp((mBlur - valley * 0.5) * uMilkOpacity, 0.0, 1.0);
+
   // Lighting from gradient of blurred mask
   float dx = mr - ml;
   float dy = mt - mb;
   vec3 n = normalize(vec3(dx, dy, length(texelSize)));
   vec3 lightDir = normalize(vec3(0.0, 0.0, 1.0));
   float diff = clamp(dot(n, lightDir), 0.0, 1.0);
-  
-  // Espresso base (no crema modulation since crema strength==0)
-  vec3 espresso = uEspresso;
-  
-  // Milk shading without specular (specular==0)
-  vec3 milkCol = uMilk * (0.8 + 0.2 * diff);
+
+  // Crema noise on espresso
+  float crema = 1.0 - uCremaStrength * hash21(floor(vUv * 256.0));
+  vec3 espresso = uEspresso * crema;
+
+  // Milk shading with specular highlight
+  float spec = pow(max(n.z, 0.0), uSpecularPower) * uMilkSpecular * mask;
+  vec3 milkCol = uMilk * (0.8 + 0.2 * diff) + spec;
   vec3 c = mix(espresso, clamp(milkCol, 0.0, 1.0), maskAlpha);
   gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }
@@ -168,14 +180,6 @@ void main () {
 }
 `
 
-
-const colorShader = `
-precision mediump float;
-uniform vec4 color;
-void main () {
-  gl_FragColor = color;
-}
-`
 
 const curlShader = `
 precision mediump float;
@@ -342,27 +346,36 @@ export const RosettaScreen = () => {
   const touchPressureRef = useRef(0)
   const pourIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pourStartTimeRef = useRef(0)
+  // Timestamp of the last move event — used to suppress the stationary interval
+  // while the finger is actively dragging.
+  const lastMoveTimeRef = useRef(0)
 
-  // Optimized continuous pouring function with widening milk effect
+  // BASE_VELOCITY is derived from SPLAT_FORCE so the config knob actually controls push strength.
+  // SPLAT_FORCE / 25 maps the default of 200 → 8 units of velocity.
+  const BASE_VELOCITY = config.SPLAT_FORCE / 25
+
+  // Stationary drip: fires on interval only when the finger is held still.
+  // Suppressed automatically when onPanResponderMove is firing (lastMoveTimeRef
+  // is updated each move event; if it was recent, we skip the interval tick).
   const startContinuousPouring = () => {
-    if (pourIntervalRef.current) return // Already pouring
+    if (pourIntervalRef.current) return
     pourStartTimeRef.current = Date.now()
     pourIntervalRef.current = setInterval(() => {
-      if (touchingRef.current) {
-        const baseVelocity = 5
-        const pressure = touchPressureRef.current || 1.0
-        const velocity = baseVelocity * pressure
-        const elapsedTime = (Date.now() - pourStartTimeRef.current) / 1000
-        splatStackRef.current.push({
-          x: lastTouchRef.current.x,
-          y: lastTouchRef.current.y,
-          dx: 0,
-          dy: -velocity, // upward flow
-          pressure,
-          elapsedTime,
-        })
-      }
-    }, 15)
+      if (!touchingRef.current) return
+      // Skip if a move event fired within the last 32 ms (two interval ticks) —
+      // onPanResponderMove is already generating splats with motion velocity.
+      if (Date.now() - lastMoveTimeRef.current < 32) return
+      const pressure = touchPressureRef.current || 1.0
+      const elapsedTime = (Date.now() - pourStartTimeRef.current) / 1000
+      splatStackRef.current.push({
+        x: lastTouchRef.current.x,
+        y: lastTouchRef.current.y,
+        dx: 0,
+        dy: -BASE_VELOCITY * pressure,
+        pressure,
+        elapsedTime,
+      })
+    }, 16)
   }
 
   const stopContinuousPouring = () => {
@@ -387,38 +400,48 @@ export const RosettaScreen = () => {
       startContinuousPouring()
     },
     onPanResponderMove: (evt) => {
-      if (touchingRef.current) {
-        const newX = evt.nativeEvent.locationX / SCREEN_WIDTH
-        const newY = 1.0 - evt.nativeEvent.locationY / SCREEN_HEIGHT
+      if (!touchingRef.current) return
+      lastMoveTimeRef.current = Date.now()
 
-        // Interpolate along movement path to ensure continuous stream
-        const prev = { ...lastTouchRef.current }
-        const dx = newX - prev.x
-        const dy = newY - prev.y
-        const dist = Math.sqrt(dx * dx + dy * dy)
-        const step = 0.005 // normalized UV step spacing
-        const steps = Math.max(1, Math.min(25, Math.ceil(dist / step)))
-        const pressure = (evt.nativeEvent as any).force || 1.0
-        const p = pressure < 0.1 ? 0.1 : pressure > 1.0 ? 1.0 : pressure
-        const baseVelocity = 3
-        const vy = -baseVelocity * p
+      const newX = evt.nativeEvent.locationX / SCREEN_WIDTH
+      const newY = 1.0 - evt.nativeEvent.locationY / SCREEN_HEIGHT
+      const pressure = (evt.nativeEvent as any).force || 1.0
+      const p = Math.max(0.1, Math.min(1.0, pressure))
+      touchPressureRef.current = p
 
-        for (let i = 1; i <= steps; i++) {
-          const t = i / steps
-          splatStackRef.current.push({
-            x: prev.x + dx * t,
-            y: prev.y + dy * t,
-            dx: 0,
-            dy: vy,
-            pressure: p,
-            elapsedTime: (Date.now() - pourStartTimeRef.current) / 1000,
-          })
-        }
+      const prev = { ...lastTouchRef.current }
+      const ddx = newX - prev.x
+      const ddy = newY - prev.y
+      const dist = Math.sqrt(ddx * ddx + ddy * ddy)
 
-        lastTouchRef.current.x = newX
-        lastTouchRef.current.y = newY
-        touchPressureRef.current = p
+      // Velocity: direction follows the drag; magnitude scales with movement
+      // speed (faster drag → more momentum), floored at BASE_VELOCITY so
+      // even a very slow drag still injects some flow.
+      // SPLAT_FORCE * 0.5 converts normalized-UV movement into velocity units
+      // on the same scale as BASE_VELOCITY.
+      const speed = Math.max(BASE_VELOCITY, dist * config.SPLAT_FORCE * 0.5)
+      const vx = dist > 0 ? (ddx / dist) * speed * p : 0
+      const vy = dist > 0 ? (ddy / dist) * speed * p : -BASE_VELOCITY * p
+
+      // Interpolate along the movement path so there are no gaps in the stream.
+      const step = 0.005
+      const steps = Math.max(1, Math.min(25, Math.ceil(dist / step)))
+      const elapsedTime = (Date.now() - pourStartTimeRef.current) / 1000
+
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps
+        splatStackRef.current.push({
+          x: prev.x + ddx * t,
+          y: prev.y + ddy * t,
+          dx: vx,
+          dy: vy,
+          pressure: p,
+          elapsedTime,
+        })
       }
+
+      lastTouchRef.current.x = newX
+      lastTouchRef.current.y = newY
     },
     onPanResponderRelease: () => {
       touchingRef.current = false
@@ -514,14 +537,6 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     else return { width: min, height: max }
   }
 
-  function normalizeColor(input: { r: number; g: number; b: number }) {
-    return {
-      r: input.r / 255,
-      g: input.g / 255,
-      b: input.b / 255,
-    }
-  }
-
   const { gl: glContext, ext } = getWebGLContext(gl)
 
   if (!ext.supportLinearFiltering) {
@@ -584,7 +599,6 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
 
   // Compile shaders
   const baseVertex = compileShader(gl.VERTEX_SHADER, baseVertexShader, ['baseVertex'])
-  const colorFrag = compileShader(gl.FRAGMENT_SHADER, colorShader, ['colorFrag'])
   const splatFrag = compileShader(gl.FRAGMENT_SHADER, splatShader, ['splatFrag'])
   const displayFrag = compileShader(gl.FRAGMENT_SHADER, displayShader, ['displayFrag'])
   const curlFrag = compileShader(gl.FRAGMENT_SHADER, curlShader, ['curlFrag'])
@@ -600,7 +614,6 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
   )
 
   // Create programs
-  const colorProgram = new Program(baseVertex, colorFrag)
   const splatProgram = new Program(baseVertex, splatFrag)
   const displayProgram = new Program(baseVertex, displayFrag)
   const curlProgram = new Program(baseVertex, curlFrag)
@@ -707,8 +720,6 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
 
   // Framebuffers
   let dye: any
-  let dyeTemp1: any
-  let dyeTemp2: any
   let velocity: any
   let curl: any
   let divergence: any
@@ -726,10 +737,6 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
 
     if (dye == null)
       dye = createDoubleFBO(dyeRes.width, dyeRes.height, rgba.internalFormat, rgba.format, texType, filtering)
-    if (dyeTemp1 == null)
-      dyeTemp1 = createFBO(dyeRes.width, dyeRes.height, rgba.internalFormat, rgba.format, texType, filtering)
-    if (dyeTemp2 == null)
-      dyeTemp2 = createFBO(dyeRes.width, dyeRes.height, rgba.internalFormat, rgba.format, texType, filtering)
 
     if (velocity == null)
       velocity = createDoubleFBO(simRes.width, simRes.height, rg.internalFormat, rg.format, texType, filtering)
@@ -792,12 +799,6 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     }
   }
 
-  function drawColor(target: any, color: { r: number; g: number; b: number }) {
-    colorProgram.bind()
-    gl.uniform4f(colorProgram.uniforms.color, color.r, color.g, color.b, 1)
-    blit(target)
-  }
-
   // Composite dye (milk mask) over espresso with lighting and valley-driven reveal.
   function drawDisplay(target: any) {
     displayProgram.bind()
@@ -811,6 +812,10 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     )
     gl.uniform3f(displayProgram.uniforms.uMilk, config.MILK_COLOR.r, config.MILK_COLOR.g, config.MILK_COLOR.b)
     gl.uniform1f(displayProgram.uniforms.uMilkOpacity, config.MILK_OPACITY)
+    gl.uniform1f(displayProgram.uniforms.uValleyStrength, config.VALLEY_STRENGTH)
+    gl.uniform1f(displayProgram.uniforms.uCremaStrength, config.CREMA_STRENGTH)
+    gl.uniform1f(displayProgram.uniforms.uMilkSpecular, config.MILK_SPECULAR)
+    gl.uniform1f(displayProgram.uniforms.uSpecularPower, config.SPECULAR_POWER)
 
     blit(target)
   }
@@ -894,8 +899,6 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
   }
 
   function render(target: any) {
-    // Direct render to target (screen)
-    if (!config.TRANSPARENT) drawColor(target, normalizeColor(config.ESPRESSO_COLOR))
     drawDisplay(target)
   }
 
