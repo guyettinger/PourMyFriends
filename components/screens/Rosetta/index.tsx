@@ -46,6 +46,8 @@ const config = {
   // Pour tuning (percent of screen width/height in splat())
   SPLAT_RADIUS: 1.2, // ~1.2% starting radius; widened over time in applyInputs()
   SPLAT_FORCE: 150,
+  RADIAL_PUSH: 1.0, // froth displacement intensity; scales with pour velocity
+                    // VELOCITY_DISSIPATION is the surface-tension settling speed
 
   // Latte-art specificsr
   TRANSPARENT: false,
@@ -155,7 +157,7 @@ void main () {
 `
 
 
-// Splat: supports velocity (add) and milk mask (saturate) modes
+// Splat: supports velocity (add) and milk mask (saturate) modes, with optional radial outward velocity
 const splatShader = `
 precision highp float;
 precision highp sampler2D;
@@ -165,16 +167,27 @@ uniform float aspectRatio;
 uniform vec3 color;
 uniform vec2 point;
 uniform float radius;
-uniform float uMaskMode; // 0.0 => additive (velocity), 1.0 => saturating (milk mask)
+uniform float uMaskMode;   // 0.0 = additive velocity, 1.0 = saturating dye
+uniform float uRadialMode; // 0.0 = directional [dx,dy], 1.0 = radial outward
+
 void main () {
-  vec2 p = vUv - point.xy;
-  p.x *= aspectRatio;
-  float s = exp(-dot(p, p) / radius);
-  vec3 splat = s * color;
+  vec2 p_raw = vUv - point.xy;
+  vec2 p = vec2(p_raw.x * aspectRatio, p_raw.y);
+  float dist2 = dot(p, p);
+  float s = exp(-dist2 / radius);
+
+  // Radial outward unit vector (aspect-corrected space -> back to UV space)
+  vec2 outward = p / (sqrt(dist2) + 0.0001);
+  vec2 radialVel = vec2(outward.x / aspectRatio, outward.y) * color.r;
+
+  // Blend: directional (uRadialMode=0) or radial outward (uRadialMode=1)
+  vec2 vel = mix(color.xy, radialVel, uRadialMode);
+
+  // Content: velocity (uMaskMode=0) or raw dye color (uMaskMode=1)
+  vec3 splatContent = mix(vec3(vel, 0.0), color, uMaskMode);
+  vec3 splat = splatContent * s;
 
   vec3 base = texture2D(uTarget, vUv).xyz;
-
-  // For milk mask: saturate toward white; for velocity: additive
   vec3 result = mix(base + splat, max(base, splat), step(0.5, uMaskMode));
   gl_FragColor = vec4(result, 1.0);
 }
@@ -752,6 +765,7 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
   // Simulation splat: injects momentum (additive) and deposits milk mask (saturating toward white).
   // - Velocity path keeps fluid motion lively.
   // - Milk mask uses a saturating blend to avoid transparent “holes” and maintain a creamy look.
+  // - Optional radialForce injects a radial outward velocity pass before the directional pass.
   function splat(
     x: number,
     y: number,
@@ -759,24 +773,36 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     dy: number,
     color: { r: number; g: number; b: number },
     customRadiusPct?: number,
+    radialForce?: number,
   ) {
     const radius = (customRadiusPct !== undefined ? customRadiusPct : config.SPLAT_RADIUS) / 10000.0
 
-    // Inject velocity (additive)
     splatProgram.bind()
     gl.uniform1i(splatProgram.uniforms.uTarget, velocity.read.attach(0))
     gl.uniform1f(splatProgram.uniforms.aspectRatio, SCREEN_WIDTH / SCREEN_HEIGHT)
     gl.uniform2f(splatProgram.uniforms.point, x, y)
+    gl.uniform1f(splatProgram.uniforms.uMaskMode, 0.0)
+
+    // Pass 1 (radial): outward displacement zone; color.r = force magnitude
+    if (radialForce != null && radialForce > 0) {
+      gl.uniform3f(splatProgram.uniforms.color, radialForce, 0.0, 0.0)
+      gl.uniform1f(splatProgram.uniforms.radius, radius * 8.0)
+      gl.uniform1f(splatProgram.uniforms.uRadialMode, 1.0)
+      blit(velocity.write)
+      velocity.swap()
+    }
+
+    // Pass 2: directional stream momentum
     gl.uniform3f(splatProgram.uniforms.color, dx, dy, 0.0)
     gl.uniform1f(splatProgram.uniforms.radius, radius)
-    gl.uniform1f(splatProgram.uniforms.uMaskMode, 0.0) // velocity path
+    gl.uniform1f(splatProgram.uniforms.uRadialMode, 0.0)
     blit(velocity.write)
     velocity.swap()
 
-    // Inject milk mask (saturating toward white)
+    // Pass 3: milk mask deposit (uMaskMode=1 → saturating; uRadialMode irrelevant here)
     gl.uniform1i(splatProgram.uniforms.uTarget, dye.read.attach(0))
     gl.uniform3f(splatProgram.uniforms.color, color.r, color.g, color.b)
-    gl.uniform1f(splatProgram.uniforms.uMaskMode, 1.0) // mask path
+    gl.uniform1f(splatProgram.uniforms.uMaskMode, 1.0)
     blit(dye.write)
     dye.swap()
   }
@@ -794,7 +820,9 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
       // Wider contact patch over time to emulate a pitcher lowering toward the surface.
       // Starts ~1.2% of min dimension and widens to ~4%.
       const radiusPct = 1.2 + Math.min(2.8, s.elapsedTime * 2.2)
-      splat(s.x, s.y, s.dx, s.dy, config.MILK_COLOR, radiusPct)
+      const speed = Math.sqrt(s.dx * s.dx + s.dy * s.dy)
+      const radialForce = speed * config.RADIAL_PUSH
+      splat(s.x, s.y, s.dx, s.dy, config.MILK_COLOR, radiusPct, radialForce)
       processed++
     }
   }
