@@ -76,4 +76,4 @@ NativeWind (Tailwind for React Native) with a custom theme in `tailwind.config.j
 
 ### Rules
 
-Rules are located in /.cursor/rules
+Rules are located in @.cursor/rules
