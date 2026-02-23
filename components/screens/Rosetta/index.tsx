@@ -40,26 +40,26 @@ const config = {
   DENSITY_DISSIPATION: 0, // milk shouldn't fade
   VELOCITY_DISSIPATION: 1, // thicker flow
   PRESSURE: 1,
-  PRESSURE_ITERATIONS: 4, // better incompressibility for smoother motion
+  PRESSURE_ITERATIONS: 2, // better incompressibility for smoother motion
   CURL: 0, // gentle roll for leaf edges
 
   // Pour tuning (percent of screen width/height in splat())
   SPLAT_RADIUS: 1.2, // ~1.2% starting radius; widened over time in applyInputs()
   SPLAT_FORCE: 150,
-  RADIAL_PUSH: 1.0, // froth displacement intensity; scales with pour velocity
+  RADIAL_PUSH: 2.5, // froth displacement intensity; scales with pour velocity
                     // VELOCITY_DISSIPATION is the surface-tension settling speed
 
-  // Latte-art specificsr
+  // Latte-art specifics
   TRANSPARENT: false,
   MASK_HARDEN: 0.0, // sharpen mask in display compositing (keep 0 for smoother edges)
-  MILK_SPECULAR: 0.06, // subtle highlight on milk foam
-  SPECULAR_POWER: 32.0, // shininess for spec term
-  SPECULAR_CLAMP: 0.0, // clamp spec contribution to avoid white jaggies
-  MILK_OPACITY: 0.95, // allow espresso to show through milk a bit
-  CREMA_STRENGTH: 0.12, // granular crema on espresso surface
+  MILK_SPECULAR: 0.32, // subtle highlight on milk foam
+  SPECULAR_POWER: 64.0, // shininess for spec term
+  SPECULAR_CLAMP: 0.48, // clamp spec contribution to avoid white jaggies
+  MILK_OPACITY: 1.0, // allow espresso to show through milk a bit
+  CREMA_STRENGTH: 0.0, // granular crema on espresso surface
   ESPRESSO_COLOR: { r: 0.09, g: 0.04, b: 0.02 },
   MILK_COLOR: { r: 1.0, g: 0.98, b: 0.95 },
-  VALLEY_STRENGTH: 0.95, // espresso shows through thin milk
+  VALLEY_STRENGTH: 0.0, // espresso shows through thin milk
   PAUSED: false,
 
 }
@@ -168,13 +168,29 @@ uniform vec3 color;
 uniform vec2 point;
 uniform float radius;
 uniform float uMaskMode;   // 0.0 = additive velocity, 1.0 = saturating dye
-uniform float uRadialMode; // 0.0 = directional [dx,dy], 1.0 = radial outward
+uniform float uRadialMode; // 0.0 = directional [dx,dy], 1.0 = radial outward (oval)
+uniform vec2 uPourDir;     // normalized pour direction in UV space (for oval anisotropy)
 
 void main () {
   vec2 p_raw = vUv - point.xy;
   vec2 p = vec2(p_raw.x * aspectRatio, p_raw.y);
   float dist2 = dot(p, p);
-  float s = exp(-dist2 / radius);
+
+  // Isotropic Gaussian — used for directional and dye passes
+  float s_iso = exp(-dist2 / radius);
+
+  // Anisotropic Gaussian — oval elongated along pour direction for radial pass.
+  // Decompose p into parallel (pour axis) and perpendicular components, then
+  // apply a tighter radius perpendicular (0.25x) so the kernel is ~2x longer
+  // along the pour than across it.
+  vec2 pourDirAC = normalize(vec2(uPourDir.x * aspectRatio, uPourDir.y));
+  float pPar = dot(p, pourDirAC);
+  vec2 pPerpVec = p - pPar * pourDirAC;
+  float pPerp2 = dot(pPerpVec, pPerpVec);
+  float s_aniso = exp(-(pPar * pPar / radius + pPerp2 / (radius * 0.25)));
+
+  // Select kernel: isotropic (uRadialMode=0) or oval (uRadialMode=1)
+  float s = mix(s_iso, s_aniso, uRadialMode);
 
   // Radial outward unit vector (aspect-corrected space -> back to UV space)
   vec2 outward = p / (sqrt(dist2) + 0.0001);
@@ -783,7 +799,13 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     gl.uniform2f(splatProgram.uniforms.point, x, y)
     gl.uniform1f(splatProgram.uniforms.uMaskMode, 0.0)
 
-    // Pass 1 (radial): outward displacement zone; color.r = force magnitude
+    // Normalized pour direction for oval anisotropy (fallback to downward if stationary)
+    const len = Math.sqrt(dx * dx + dy * dy)
+    const pourDirX = len > 0.0001 ? dx / len : 0.0
+    const pourDirY = len > 0.0001 ? dy / len : -1.0
+    gl.uniform2f(splatProgram.uniforms.uPourDir, pourDirX, pourDirY)
+
+    // Pass 1 (radial): oval outward displacement zone; color.r = force magnitude
     if (radialForce != null && radialForce > 0) {
       gl.uniform3f(splatProgram.uniforms.color, radialForce, 0.0, 0.0)
       gl.uniform1f(splatProgram.uniforms.radius, radius * 8.0)
