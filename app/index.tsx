@@ -1,6 +1,5 @@
-import { HomeScreen } from 'components/screens/Home'
-import { RosettaScreen } from '~/components/screens/Rosetta'
+import { SplashIntroScreen } from '~/components/screens/Splash'
 
 export default function Screen() {
-  return <RosettaScreen />
+  return <SplashIntroScreen />
 }

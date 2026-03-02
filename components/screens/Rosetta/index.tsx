@@ -1,6 +1,8 @@
-import React, { useRef } from 'react'
-import { View, Dimensions, PanResponder } from 'react-native'
+import React, { useRef, useState } from 'react'
+import { View, Dimensions, PanResponder, Modal, TouchableOpacity, Text as RNText, ScrollView, Platform } from 'react-native'
 import { GLView } from 'expo-gl'
+import { router } from 'expo-router'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
 /*
 Latte Art Rosetta Simulator (Expo + WebGL)
@@ -40,29 +42,53 @@ const config = {
   DENSITY_DISSIPATION: 0, // milk shouldn't fade
   VELOCITY_DISSIPATION: 1, // thicker flow
   PRESSURE: 1,
-  PRESSURE_ITERATIONS: 2, // better incompressibility for smoother motion
+  PRESSURE_ITERATIONS: 1, // better incompressibility for smoother motion
   CURL: 0, // gentle roll for leaf edges
 
   // Pour tuning (percent of screen width/height in splat())
   SPLAT_RADIUS: 1.2, // ~1.2% starting radius; widened over time in applyInputs()
   SPLAT_FORCE: 150,
-  RADIAL_PUSH: 2.5, // froth displacement intensity; scales with pour velocity
+  RADIAL_PUSH: 2.5,    // froth displacement intensity; scales with pour velocity
+  FOAM_ABSORPTION: 1.0, // Beer-Lambert absorption coefficient; higher = foam turns opaque faster
                     // VELOCITY_DISSIPATION is the surface-tension settling speed
 
   // Latte-art specifics
   TRANSPARENT: false,
-  MASK_HARDEN: 0.0, // sharpen mask in display compositing (keep 0 for smoother edges)
-  MILK_SPECULAR: 0.32, // subtle highlight on milk foam
-  SPECULAR_POWER: 64.0, // shininess for spec term
+  MASK_HARDEN: 0.40, // sharpen milk-espresso boundary; 0 = soft linear, 1 = crisp
+  MILK_SPECULAR: 0.28, // subtle highlight on milk foam
+  SPECULAR_POWER: 48.0, // shininess for spec term
   SPECULAR_CLAMP: 0.48, // clamp spec contribution to avoid white jaggies
-  MILK_OPACITY: 1.0, // allow espresso to show through milk a bit
-  CREMA_STRENGTH: 0.0, // granular crema on espresso surface
-  ESPRESSO_COLOR: { r: 0.09, g: 0.04, b: 0.02 },
-  MILK_COLOR: { r: 1.0, g: 0.98, b: 0.95 },
-  VALLEY_STRENGTH: 0.0, // espresso shows through thin milk
+  MILK_OPACITY: 1.0, // allow a hint of espresso to bleed through thin milk
+  CREMA_STRENGTH: 0.0, // granular crema texture on espresso surface
+  ESPRESSO_COLOR: { r: 0.14, g: 0.055, b: 0.014 }, // deep espresso brown (dark in linear = rich on screen)
+  MILK_COLOR: { r: 1.0, g: 0.98, b: 0.96 },         // bright neutral white foam
+  VALLEY_STRENGTH: 0.90, // espresso shows through thin milk (key for latte art lines)
   PAUSED: false,
 
 }
+
+// Settings exposed in the HUD modal
+type SimSettings = {
+  SPLAT_RADIUS: number
+  SPLAT_FORCE: number
+  VELOCITY_DISSIPATION: number
+  CURL: number
+  VALLEY_STRENGTH: number
+  MASK_HARDEN: number
+  RADIAL_PUSH: number
+  FOAM_ABSORPTION: number
+}
+
+const SETTING_DEFS: { label: string; key: keyof SimSettings; min: number; max: number; step: number }[] = [
+  { label: 'Pour Width', key: 'SPLAT_RADIUS', min: 0.5, max: 4.0, step: 0.1 },
+  { label: 'Pour Force', key: 'SPLAT_FORCE', min: 50, max: 300, step: 10 },
+  { label: 'Flow Thickness', key: 'VELOCITY_DISSIPATION', min: 0, max: 2, step: 0.1 },
+  { label: 'Swirl', key: 'CURL', min: 0, max: 5, step: 0.5 },
+  { label: 'Edge Definition', key: 'VALLEY_STRENGTH', min: 0, max: 1, step: 0.05 },
+  { label: 'Milk Boundary', key: 'MASK_HARDEN', min: 0, max: 1, step: 0.05 },
+  { label: 'Radial Push', key: 'RADIAL_PUSH', min: 0, max: 5, step: 0.25 },
+  { label: 'Foam Absorption', key: 'FOAM_ABSORPTION', min: 0, max: 2, step: 0.1 },
+]
 
 // Shaders
 const baseVertexShader = `
@@ -106,6 +132,8 @@ uniform float uValleyStrength;
 uniform float uCremaStrength;
 uniform float uMilkSpecular;
 uniform float uSpecularPower;
+uniform float uMaskHarden;     // 0 = soft linear blend, 1 = crisp smoothstep boundary
+uniform float uFoamAbsorption; // Beer-Lambert k: opacity = 1 - exp(-k * thickness)
 
 float hash21(vec2 p) {
   return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -135,7 +163,18 @@ void main () {
   float laplacian = ml + mr + mt + mb - 4.0 * m;
   float valley = clamp(laplacian * uValleyStrength * 10.0, 0.0, 1.0);
   float mask = mBlur;
-  float maskAlpha = clamp((mBlur - valley * 0.5) * uMilkOpacity, 0.0, 1.0);
+
+  // Beer-Lambert: foam as a scattering medium where opacity = 1 - exp(-k * thickness).
+  // Thin foam (low mBlur) is genuinely translucent; thick foam is opaque. This maps
+  // the linear mask value onto a physically-based opacity before the smoothstep sharpener.
+  float physAlpha = 1.0 - exp(-uFoamAbsorption * mBlur);
+
+  // Sharpen the milk-espresso boundary on top of the physical curve.
+  // uMaskHarden=0: lo=0.0/hi=1.0 (linear, soft). uMaskHarden=1: lo=0.3/hi=0.65 (crisp).
+  float lo = mix(0.0, 0.3, uMaskHarden);
+  float hi = mix(1.0, 0.65, uMaskHarden);
+  float mEdge = smoothstep(lo, hi, physAlpha);
+  float maskAlpha = clamp((mEdge - valley * 0.5) * uMilkOpacity, 0.0, 1.0);
 
   // Lighting from gradient of blurred mask
   float dx = mr - ml;
@@ -378,6 +417,37 @@ export const RosettaScreen = () => {
   // Timestamp of the last move event — used to suppress the stationary interval
   // while the finger is actively dragging.
   const lastMoveTimeRef = useRef(0)
+  // Cancellation handle for the active RAF loop — called before a new context starts
+  // so the old loop stops rather than continuing to run against a destroyed GL context.
+  const cancelSimRef = useRef<(() => void) | null>(null)
+
+  // Simulation key: incrementing forces GLView to remount (full WebGL context reset)
+  const [simKey, setSimKey] = useState(0)
+  // Settings modal visibility
+  const [settingsVisible, setSettingsVisible] = useState(false)
+  // Local copy of adjustable config values for UI display
+  const [settings, setSettings] = useState<SimSettings>({
+    SPLAT_RADIUS: config.SPLAT_RADIUS,
+    SPLAT_FORCE: config.SPLAT_FORCE,
+    VELOCITY_DISSIPATION: config.VELOCITY_DISSIPATION,
+    CURL: config.CURL,
+    VALLEY_STRENGTH: config.VALLEY_STRENGTH,
+    MASK_HARDEN: config.MASK_HARDEN,
+    RADIAL_PUSH: config.RADIAL_PUSH,
+    FOAM_ABSORPTION: config.FOAM_ABSORPTION,
+  })
+
+  const insets = useSafeAreaInsets()
+
+  // Adjust a setting: updates local state and mutates config so simulation picks it up immediately
+  const adjustSetting = (key: keyof SimSettings, delta: number, min: number, max: number) => {
+    setSettings((prev) => {
+      const next = Math.round((prev[key] + delta) * 1000) / 1000
+      const clamped = Math.max(min, Math.min(max, next))
+      ;(config as any)[key] = clamped
+      return { ...prev, [key]: clamped }
+    })
+  }
 
   // BASE_VELOCITY is derived from SPLAT_FORCE so the config knob actually controls push strength.
   // SPLAT_FORCE / 25 maps the default of 200 → 8 units of velocity.
@@ -482,15 +552,148 @@ export const RosettaScreen = () => {
   return (
     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgb(25, 15, 8)' }}>
       <GLView
+        key={simKey}
         style={{ width: SCREEN_WIDTH, height: SCREEN_HEIGHT }}
-        onContextCreate={(gl) => onContextCreate(gl, splatStackRef)}
+        onContextCreate={(gl) => {
+          // Cancel any previous animation loop before this new context starts.
+          if (cancelSimRef.current) {
+            cancelSimRef.current()
+            cancelSimRef.current = null
+          }
+          // Discard splats queued for the old session so they don't bleed into the reset.
+          splatStackRef.current = []
+          onContextCreate(gl, splatStackRef, cancelSimRef)
+        }}
         {...panResponder.panHandlers}
       />
+
+      {/* HUD overlay — box-none so the bar background passes touches to GLView */}
+      <View
+        pointerEvents="box-none"
+        style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          paddingTop: insets.top + 8,
+          paddingBottom: 12,
+          paddingHorizontal: 8,
+          flexDirection: 'row',
+          alignItems: 'center',
+          backgroundColor: 'rgba(0,0,0,0.45)',
+        }}
+      >
+        <TouchableOpacity onPress={() => router.back()} style={{ padding: 8, minWidth: 44 }}>
+          <RNText style={{ color: 'white', fontSize: 28, lineHeight: 32 }}>‹</RNText>
+        </TouchableOpacity>
+        <View style={{ flex: 1, alignItems: 'center' }}>
+          <RNText style={{ color: 'white', fontSize: 17, fontFamily: 'SF-Pro-Display-Bold' }}>
+            Rosetta
+          </RNText>
+        </View>
+        <TouchableOpacity onPress={() => setSimKey((k) => k + 1)} style={{ padding: 8 }}>
+          <RNText style={{ color: 'white', fontSize: 22 }}>↺</RNText>
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={() => setSettingsVisible(true)}
+          style={{ padding: 8, minWidth: 44, alignItems: 'flex-end' }}
+        >
+          <RNText style={{ color: 'white', fontSize: 22 }}>⚙</RNText>
+        </TouchableOpacity>
+      </View>
+
+      {/* Settings modal */}
+      <Modal
+        visible={settingsVisible}
+        animationType="slide"
+        presentationStyle={Platform.OS === 'ios' ? 'pageSheet' : 'fullScreen'}
+        onRequestClose={() => setSettingsVisible(false)}
+      >
+        <View style={{ flex: 1, backgroundColor: 'rgb(18, 12, 8)' }}>
+          {/* Header */}
+          <View
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              paddingTop: 20,
+              paddingHorizontal: 20,
+              paddingBottom: 12,
+              borderBottomWidth: 1,
+              borderBottomColor: 'rgba(255,255,255,0.1)',
+            }}
+          >
+            <RNText
+              style={{ flex: 1, color: 'white', fontSize: 18, fontFamily: 'SF-Pro-Display-Bold' }}
+            >
+              Simulation Settings
+            </RNText>
+            <TouchableOpacity onPress={() => setSettingsVisible(false)} style={{ padding: 4 }}>
+              <RNText style={{ color: '#A0896B', fontSize: 16 }}>Done</RNText>
+            </TouchableOpacity>
+          </View>
+          {/* Setting rows */}
+          <ScrollView style={{ flex: 1 }}>
+            {SETTING_DEFS.map(({ label, key, min, max, step }) => {
+              const decimals = step < 1 ? 2 : 0
+              return (
+                <View
+                  key={key}
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    paddingVertical: 14,
+                    paddingHorizontal: 20,
+                    borderBottomWidth: 1,
+                    borderBottomColor: 'rgba(255,255,255,0.06)',
+                  }}
+                >
+                  <RNText style={{ flex: 1, color: '#D0C0A8', fontSize: 15 }}>{label}</RNText>
+                  <TouchableOpacity
+                    onPress={() => adjustSetting(key, -step, min, max)}
+                    style={{
+                      width: 36,
+                      height: 36,
+                      borderRadius: 8,
+                      backgroundColor: 'rgba(255,255,255,0.1)',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <RNText style={{ color: 'white', fontSize: 20, lineHeight: 24 }}>−</RNText>
+                  </TouchableOpacity>
+                  <RNText
+                    style={{ color: 'white', fontSize: 15, width: 56, textAlign: 'center' }}
+                  >
+                    {settings[key].toFixed(decimals)}
+                  </RNText>
+                  <TouchableOpacity
+                    onPress={() => adjustSetting(key, step, min, max)}
+                    style={{
+                      width: 36,
+                      height: 36,
+                      borderRadius: 8,
+                      backgroundColor: 'rgba(255,255,255,0.1)',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                    }}
+                  >
+                    <RNText style={{ color: 'white', fontSize: 20, lineHeight: 24 }}>+</RNText>
+                  </TouchableOpacity>
+                </View>
+              )
+            })}
+          </ScrollView>
+        </View>
+      </Modal>
     </View>
   )
 }
 
-function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.MutableRefObject<any[]>) {
+function onContextCreate(
+  gl: WebGLRenderingContext,
+  splatStackRef: React.MutableRefObject<any[]>,
+  cancelSimRef: React.MutableRefObject<(() => void) | null>,
+) {
   // Utilities
   function getWebGLContext(gl: any) {
     const isWebGL2 = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext
@@ -769,8 +972,9 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
 
     if (velocity == null)
       velocity = createDoubleFBO(simRes.width, simRes.height, rg.internalFormat, rg.format, texType, filtering)
-    if (config.CURL !== 0 && curl == null)
-      curl = createFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST)
+    // Always allocate the curl FBO so the CURL setting can be changed at runtime without crashing.
+  if (curl == null)
+    curl = createFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST)
     if (divergence == null)
       divergence = createFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST)
     if (pressure == null)
@@ -840,8 +1044,8 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     while ((splatStackRef.current?.length ?? 0) > 0 && processed < maxSplatsPerFrame) {
       const s = splatStackRef.current.shift()
       // Wider contact patch over time to emulate a pitcher lowering toward the surface.
-      // Starts ~1.2% of min dimension and widens to ~4%.
-      const radiusPct = 1.2 + Math.min(2.8, s.elapsedTime * 2.2)
+      // Starts at SPLAT_RADIUS (user-adjustable) and grows by up to 2.8% over the pour duration.
+      const radiusPct = config.SPLAT_RADIUS + Math.min(2.8, s.elapsedTime * 2.2)
       const speed = Math.sqrt(s.dx * s.dx + s.dy * s.dy)
       const radialForce = speed * config.RADIAL_PUSH
       splat(s.x, s.y, s.dx, s.dy, config.MILK_COLOR, radiusPct, radialForce)
@@ -866,6 +1070,8 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     gl.uniform1f(displayProgram.uniforms.uCremaStrength, config.CREMA_STRENGTH)
     gl.uniform1f(displayProgram.uniforms.uMilkSpecular, config.MILK_SPECULAR)
     gl.uniform1f(displayProgram.uniforms.uSpecularPower, config.SPECULAR_POWER)
+    gl.uniform1f(displayProgram.uniforms.uMaskHarden, config.MASK_HARDEN)
+    gl.uniform1f(displayProgram.uniforms.uFoamAbsorption, config.FOAM_ABSORPTION)
 
     blit(target)
   }
@@ -964,12 +1170,27 @@ function onContextCreate(gl: WebGLRenderingContext, splatStackRef: React.Mutable
     return dt
   }
 
+  // Cancellation flag: set to true by cancelSimRef.current() when a new GL context
+  // is created (GLView remounts after simKey increment). Stops the loop from
+  // running against a destroyed context, preventing CPU/GPU resource leaks.
+  let cancelled = false
+  cancelSimRef.current = () => {
+    cancelled = true
+  }
+
   function update() {
+    if (cancelled) return
     const dt = calcDeltaTime()
     applyInputs()
     if (!config.PAUSED) step(dt)
     render(null)
-    ;(gl as any).endFrameEXP()
+    try {
+      ;(gl as any).endFrameEXP()
+    } catch {
+      // GL context was destroyed (GLView unmounted) — stop the loop gracefully.
+      cancelled = true
+      return
+    }
     requestAnimationFrame(update)
   }
 

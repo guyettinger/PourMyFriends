@@ -2,7 +2,7 @@ import { useCallback, useEffect } from 'react'
 import { configureReanimatedLogger, ReanimatedLogLevel } from 'react-native-reanimated'
 import { DarkTheme, DefaultTheme, Theme, ThemeProvider } from '@react-navigation/native'
 import { useFonts } from 'expo-font'
-import { SplashScreen, Slot } from 'expo-router'
+import { SplashScreen, Stack } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import { COLORS } from '~/lib/colors'
 import { useColorScheme } from '~/hooks/useColorScheme'
@@ -65,7 +65,12 @@ export default function RootLayout() {
       <ThemeProvider value={colorScheme === 'dark' ? DARK_THEME : LIGHT_THEME}>
         <StatusBar hidden={true} />
         <View onLayout={onLayoutRootView} className="flex-1 bg-background">
-          <Slot />
+          <Stack screenOptions={{ headerShown: false }}>
+            <Stack.Screen name="index" />
+            <Stack.Screen name="home" />
+            <Stack.Screen name="about" />
+            <Stack.Screen name="rosetta" />
+          </Stack>
         </View>
       </ThemeProvider>
     </AnalyticsProviders>
