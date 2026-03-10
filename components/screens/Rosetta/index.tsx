@@ -1,89 +1,251 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { View, Dimensions, PanResponder, Modal, TouchableOpacity, Text as RNText, ScrollView, Platform } from 'react-native'
+import {
+  View,
+  Dimensions,
+  PanResponder,
+  Modal,
+  TouchableOpacity,
+  Text as RNText,
+  ScrollView,
+  Platform,
+} from 'react-native'
 import { GLView } from 'expo-gl'
 import { router } from 'expo-router'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 
-/*
-Latte Art Rosetta Simulator (Expo + WebGL)
-
-Overview
-- Simulates a simplified 2D fluid field (velocity/pressure) and a dye buffer representing frothed milk.
-- The user pours by touching/draging; we inject velocity and deposit a milk mask via splats.
-- A display shader composites milk over espresso, revealing espresso in “valleys” (thin milk) with subtle lighting and crema noise.
-
-Goals
-- Realistic layered look (milk/espresso separation) without heavy compute cost.
-- Stable, responsive pouring interactions and smooth edges (reduced pixelation).
-- Portable WebGL pipeline (ES 2.0 compatible) for Expo/React Native.
-
-Pipeline
-1) Velocity update: curl -> vorticity confinement -> divergence -> pressure solve -> gradient subtract -> advection.
-2) Dye (milk) advection by the velocity field; dye has zero dissipation (milk persists).
-3) Display: tent-filter the milk mask, estimate valleys using a Laplacian, thin milk in valleys, add gentle specular and crema modulation.
-
-Notes on sharpness vs realism
-- Pixelation often comes from aggressive valley reveal thresholds and hard masks.
-- We use a small tent blur and a softened valley threshold (k) to reduce blockiness while keeping crisp rosetta edges.
-*/
+/**
+ * Latte Art Rosetta Simulator (Expo + WebGL)
+ *
+ * Simulates a 2D fluid field (velocity/pressure) and a dye buffer representing frothed milk.
+ * The user pours by touching/dragging; velocity and a milk mask are injected via Gaussian splats.
+ * A display shader composites milk over espresso, revealing espresso in "valleys" (thin milk)
+ * with subtle lighting and crema noise.
+ *
+ * Pipeline:
+ * 1. Velocity update: curl -> vorticity confinement -> divergence -> pressure solve -> gradient subtract -> advection.
+ * 2. Dye (milk) advection by the velocity field; dye has zero dissipation (milk persists).
+ * 3. Display: tent-filter the milk mask, estimate valleys via Laplacian, thin milk in valleys, add specular and crema.
+ */
 
 const SCREEN_WIDTH = Dimensions.get('screen').width
 const SCREEN_HEIGHT = Dimensions.get('screen').height
 
-// Configuration for Latte Art Simulator (espresso + frothed milk)
-// Global configuration for the latte art simulator.
-// Adjust these to balance realism, sharpness, and performance.
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/** RGB color with components in the 0–1 range. */
+interface RGBColor {
+  /** Red channel. */
+  r: number
+  /** Green channel. */
+  g: number
+  /** Blue channel. */
+  b: number
+}
+
+/** Pending splat input queued from touch events. */
+interface SplatInput {
+  /** UV x-coordinate (0 = left, 1 = right). */
+  x: number
+  /** UV y-coordinate (0 = bottom, 1 = top). */
+  y: number
+  /** Velocity x-component in sim units. */
+  dx: number
+  /** Velocity y-component in sim units. */
+  dy: number
+  /** Normalized touch pressure (0.1–1.0). */
+  pressure: number
+  /** Seconds elapsed since the current pour began. */
+  elapsedTime: number
+}
+
+/** WebGL texture format pair for FBO creation. */
+interface TextureFormat {
+  /** GL internal format enum (e.g. RGBA16F). */
+  internalFormat: number
+  /** GL pixel format enum (e.g. RGBA). */
+  format: number
+}
+
+/** WebGL extension capabilities detected at init. */
+interface GLExtensions {
+  /** RGBA half-float format, or null if unsupported. */
+  formatRGBA: TextureFormat | null
+  /** RG half-float format, or null if unsupported. */
+  formatRG: TextureFormat | null
+  /** R half-float format, or null if unsupported. */
+  formatR: TextureFormat | null
+  /** Half-float texture type enum. */
+  halfFloatTexType: number
+  /** Whether OES_texture_*_linear is available. */
+  supportLinearFiltering: unknown
+}
+
+/** Single framebuffer object with an attached texture. */
+interface FBO {
+  /** The backing GL texture. */
+  texture: WebGLTexture
+  /** The GL framebuffer. */
+  fbo: WebGLFramebuffer
+  /** Texture width in pixels. */
+  width: number
+  /** Texture height in pixels. */
+  height: number
+  /** 1 / width. */
+  texelSizeX: number
+  /** 1 / height. */
+  texelSizeY: number
+  /** Bind this texture to the given texture unit and return the unit index. */
+  attach: (id: number) => number
+}
+
+/** Double-buffered FBO for ping-pong rendering. */
+interface DoubleFBO {
+  /** Texture width in pixels. */
+  width: number
+  /** Texture height in pixels. */
+  height: number
+  /** 1 / width. */
+  texelSizeX: number
+  /** 1 / height. */
+  texelSizeY: number
+  /** Current read buffer. */
+  read: FBO
+  /** Current write buffer. */
+  write: FBO
+  /** Swap read and write buffers. */
+  swap: () => void
+}
+
+/** Parameters for a single fluid splat injection. */
+interface SplatParams {
+  /** UV x-coordinate of the splat center. */
+  x: number
+  /** UV y-coordinate of the splat center. */
+  y: number
+  /** Velocity x-component. */
+  dx: number
+  /** Velocity y-component. */
+  dy: number
+  /** Dye color to deposit. */
+  color: RGBColor
+  /** Splat radius as a percentage of screen size. Defaults to config.SPLAT_RADIUS. */
+  radiusPct?: number
+  /** Radial outward displacement force. */
+  radialForce?: number
+}
+
+/** Parameters for creating a single FBO. */
+interface CreateFBOParams {
+  /** Width in pixels. */
+  w: number
+  /** Height in pixels. */
+  h: number
+  /** GL internal format. */
+  internalFormat: number
+  /** GL pixel format. */
+  format: number
+  /** GL texture data type. */
+  type: number
+  /** GL filtering mode (LINEAR or NEAREST). */
+  filtering: number
+}
+
+/** Compiled GL program wrapper. */
+interface GLProgram {
+  /** Map of uniform names to their GL locations. */
+  uniforms: Record<string, WebGLUniformLocation | null>
+  /** The underlying WebGLProgram. */
+  program: WebGLProgram
+  /** Activate this program for subsequent draw calls. */
+  bind: () => void
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/**
+ * Global simulation configuration.
+ * Mutate directly for immediate effect; settings UI writes here.
+ */
 const config = {
   SIM_RESOLUTION: 256,
   DYE_RESOLUTION: 512,
   CAPTURE_RESOLUTION: 1024,
 
   // Fluid tuning
-  DENSITY_DISSIPATION: 0, // milk shouldn't fade
-  VELOCITY_DISSIPATION: 1, // thicker flow
+  DENSITY_DISSIPATION: 0,
+  VELOCITY_DISSIPATION: 1,
   PRESSURE: 1,
-  PRESSURE_ITERATIONS: 10, // 10 iterations: good incompressibility without heavy GPU cost
-  CURL: 0, // gentle roll for leaf edges
+  PRESSURE_ITERATIONS: 10,
+  CURL: 0,
 
-  // Pour tuning (percent of screen width/height in splat())
-  SPLAT_RADIUS: 1.2, // ~1.2% starting radius; widened over time in applyInputs()
+  // Pour tuning
+  SPLAT_RADIUS: 1.2,
   SPLAT_FORCE: 200,
-  RADIAL_PUSH: 3.0,    // froth displacement intensity; scales with pour velocity
-  FOAM_ABSORPTION: 1.0, // Beer-Lambert absorption coefficient; higher = foam turns opaque faster
-                    // VELOCITY_DISSIPATION is the surface-tension settling speed
+  RADIAL_PUSH: 3.0,
+  FOAM_ABSORPTION: 1.0,
 
-  // Latte-art specifics
+  // Latte-art display
   TRANSPARENT: false,
-  MASK_HARDEN: 0.40, // sharpen milk-espresso boundary; 0 = soft linear, 1 = crisp
-  MILK_SPECULAR: 0.28, // subtle highlight on milk foam
-  SPECULAR_POWER: 48.0, // shininess for spec term
-  SPECULAR_CLAMP: 0.48, // clamp spec contribution to avoid white jaggies
-  MILK_OPACITY: 1.0, // allow a hint of espresso to bleed through thin milk
-  CREMA_STRENGTH: 0.08, // granular crema texture on espresso surface
-  ESPRESSO_COLOR: { r: 0.14, g: 0.055, b: 0.014 }, // deep espresso brown (dark in linear = rich on screen)
-  MILK_COLOR: { r: 1.0, g: 0.98, b: 0.96 },         // bright neutral white foam
-  VALLEY_STRENGTH: 0.90, // espresso shows through thin milk (key for latte art lines)
+  MASK_HARDEN: 0.4,
+  MILK_SPECULAR: 0.28,
+  SPECULAR_POWER: 48.0,
+  SPECULAR_CLAMP: 0.48,
+  MILK_OPACITY: 1.0,
+  CREMA_STRENGTH: 0.08,
+  ESPRESSO_COLOR: { r: 0.14, g: 0.055, b: 0.014 } as RGBColor,
+  MILK_COLOR: { r: 1.0, g: 0.98, b: 0.96 } as RGBColor,
+  VALLEY_STRENGTH: 0.9,
   PAUSED: false,
-
 }
 
-// Settings exposed in the HUD modal
-type SimSettings = {
+/** User-adjustable simulation settings exposed in the HUD modal. */
+interface SimSettings {
+  /** Gaussian splat radius as % of screen. */
   SPLAT_RADIUS: number
+  /** Velocity magnitude injected per splat. */
   SPLAT_FORCE: number
+  /** Rate at which velocity decays each frame (higher = faster decay). */
   VELOCITY_DISSIPATION: number
+  /** Vorticity confinement strength. */
   CURL: number
+  /** Strength of espresso reveal in thin-milk valleys. */
   VALLEY_STRENGTH: number
+  /** Sharpness of the milk-espresso boundary (0 = soft, 1 = crisp). */
   MASK_HARDEN: number
+  /** Radial outward displacement intensity around the pour point. */
   RADIAL_PUSH: number
+  /** Beer-Lambert absorption coefficient for foam opacity. */
   FOAM_ABSORPTION: number
+  /** Granular crema noise intensity on espresso surface. */
   CREMA_STRENGTH: number
+  /** Overall milk opacity (lower reveals more espresso through foam). */
   MILK_OPACITY: number
+  /** Specular highlight intensity on milk foam. */
   MILK_SPECULAR: number
+  /** Specular exponent controlling highlight tightness. */
   SPECULAR_POWER: number
 }
 
-const SETTING_DEFS: { label: string; key: keyof SimSettings; min: number; max: number; step: number }[] = [
+/** UI definition for a single settings row. */
+interface SettingDef {
+  /** Display label shown in the settings modal. */
+  label: string
+  /** Config key to read/write. */
+  key: keyof SimSettings
+  /** Minimum allowed value. */
+  min: number
+  /** Maximum allowed value. */
+  max: number
+  /** Increment/decrement step size. */
+  step: number
+}
+
+/** Settings modal definitions mapping labels to config keys. */
+const SETTING_DEFS: SettingDef[] = [
   { label: 'Pour Width', key: 'SPLAT_RADIUS', min: 0.5, max: 4.0, step: 0.1 },
   { label: 'Pour Force', key: 'SPLAT_FORCE', min: 50, max: 300, step: 10 },
   { label: 'Flow Decay', key: 'VELOCITY_DISSIPATION', min: 0, max: 2, step: 0.1 },
@@ -98,6 +260,7 @@ const SETTING_DEFS: { label: string; key: keyof SimSettings; min: number; max: n
   { label: 'Shine Focus', key: 'SPECULAR_POWER', min: 8, max: 128, step: 4 },
 ]
 
+/** Snapshot of config values at module load, used for "Reset to Defaults". */
 const DEFAULT_SETTINGS: SimSettings = {
   SPLAT_RADIUS: config.SPLAT_RADIUS,
   SPLAT_FORCE: config.SPLAT_FORCE,
@@ -113,7 +276,11 @@ const DEFAULT_SETTINGS: SimSettings = {
   SPECULAR_POWER: config.SPECULAR_POWER,
 }
 
-// Shaders
+// ---------------------------------------------------------------------------
+// GLSL Shaders
+// ---------------------------------------------------------------------------
+
+/** Shared vertex shader: computes UV and 4-neighbor offsets from texelSize. */
 const baseVertexShader = `
 precision highp float;
 attribute vec2 aPosition;
@@ -133,11 +300,11 @@ void main () {
 }
 `
 
-// Display: composite milk mask over espresso with gentle lighting
-// Anti-pixelation measures:
-// - 3x3 tent blur of the milk mask to reduce blockiness without losing edge definition
-// - Resolution-scaled valley threshold (k) for stable reveal across devices
-// - Specular clamped and gated by mask to avoid bright jaggies along seams
+/**
+ * Display fragment shader: composites milk mask over espresso.
+ * Uses a 3x3 tent blur, Laplacian valley detection, Beer-Lambert opacity,
+ * boundary sharpening, directional lighting, crema noise, and warm specular.
+ */
 const displayShader = `
 precision highp float;
 precision highp sampler2D;
@@ -146,7 +313,7 @@ varying vec2 vL;
 varying vec2 vR;
 varying vec2 vT;
 varying vec2 vB;
-uniform sampler2D uTexture; // dye as milk mask (use R)
+uniform sampler2D uTexture;
 uniform vec3 uEspresso;
 uniform vec3 uMilk;
 uniform float uMilkOpacity;
@@ -155,64 +322,61 @@ uniform float uValleyStrength;
 uniform float uCremaStrength;
 uniform float uMilkSpecular;
 uniform float uSpecularPower;
-uniform float uMaskHarden;     // 0 = soft linear blend, 1 = crisp smoothstep boundary
-uniform float uFoamAbsorption; // Beer-Lambert k: opacity = 1 - exp(-k * thickness)
-uniform float uSpecularClamp;  // clamp spec contribution to avoid white jaggies
+uniform float uMaskHarden;
+uniform float uFoamAbsorption;
+uniform float uSpecularClamp;
 
 float hash21(vec2 p) {
   return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
 
 void main () {
-  // 4-neighbor
+  // Sample 4-neighbor mask values
   float m  = texture2D(uTexture, vUv).r;
   float ml = texture2D(uTexture, vL).r;
   float mr = texture2D(uTexture, vR).r;
   float mt = texture2D(uTexture, vT).r;
   float mb = texture2D(uTexture, vB).r;
 
-  // Diagonals (computed using texelSize to avoid extra varyings)
+  // Diagonal samples for 3x3 tent kernel
   vec2 d = texelSize;
   float mtl = texture2D(uTexture, vUv + vec2(-d.x,  d.y)).r;
   float mtr = texture2D(uTexture, vUv + vec2( d.x,  d.y)).r;
   float mbl = texture2D(uTexture, vUv + vec2(-d.x, -d.y)).r;
   float mbr = texture2D(uTexture, vUv + vec2( d.x, -d.y)).r;
 
-  // 3x3 tent blur (low-pass) to reduce pixelation
+  // 3x3 tent blur to reduce pixelation
   float edges = ml + mr + mt + mb;
   float corners = mtl + mtr + mbl + mbr;
   float mBlur = (4.0*m + 2.0*edges + corners) / 16.0;
 
-  // Valley: Laplacian of raw mask (positive at local minima = thin milk pits)
+  // Valley detection: Laplacian of raw mask (positive at local minima = thin milk)
   float laplacian = ml + mr + mt + mb - 4.0 * m;
   float valleyScale = 10.0 / (length(texelSize) * 512.0);
   float valley = clamp(laplacian * uValleyStrength * valleyScale, 0.0, 1.0);
   float mask = mBlur;
 
-  // Beer-Lambert: foam as a scattering medium where opacity = 1 - exp(-k * thickness).
-  // Thin foam (low mBlur) is genuinely translucent; thick foam is opaque. This maps
-  // the linear mask value onto a physically-based opacity before the smoothstep sharpener.
+  // Beer-Lambert opacity: thin foam is translucent, thick foam is opaque
   float physAlpha = 1.0 - exp(-uFoamAbsorption * mBlur);
 
-  // Sharpen the milk-espresso boundary on top of the physical curve.
-  // uMaskHarden=0: lo=0.0/hi=1.0 (linear, soft). uMaskHarden=1: lo=0.3/hi=0.65 (crisp).
+  // Sharpen the milk-espresso boundary
   float lo = mix(0.0, 0.3, uMaskHarden);
   float hi = mix(1.0, 0.65, uMaskHarden);
   float mEdge = smoothstep(lo, hi, physAlpha);
   float maskAlpha = clamp((mEdge - valley * 0.5) * uMilkOpacity, 0.0, 1.0);
 
-  // Lighting from gradient of blurred mask
+  // Directional lighting from blurred mask gradient
   float dx = mr - ml;
   float dy = mt - mb;
   vec3 n = normalize(vec3(dx, dy, 0.15));
   vec3 lightDir = normalize(vec3(0.2, 0.3, 1.0));
   float diff = clamp(dot(n, lightDir), 0.0, 1.0);
 
-  // Crema noise on espresso
+  // Crema noise on espresso surface
   float crema = 1.0 - uCremaStrength * hash21(floor(vUv * 256.0));
   vec3 espresso = uEspresso * crema;
 
-  // Milk shading with specular highlight (gated by maskAlpha, not raw mask)
+  // Specular highlight gated by maskAlpha with warm tint
   float spec = pow(max(n.z, 0.0), uSpecularPower) * uMilkSpecular * maskAlpha;
   spec = min(spec, uSpecularClamp);
   vec3 warmSpec = spec * vec3(1.0, 0.97, 0.92);
@@ -222,8 +386,10 @@ void main () {
 }
 `
 
-
-// Splat: supports velocity (add) and milk mask (saturate) modes, with optional radial outward velocity
+/**
+ * Splat fragment shader: injects velocity (additive) or milk mask (saturating).
+ * Supports isotropic Gaussian (directional/dye) and anisotropic oval (radial push).
+ */
 const splatShader = `
 precision highp float;
 precision highp sampler2D;
@@ -233,39 +399,33 @@ uniform float aspectRatio;
 uniform vec3 color;
 uniform vec2 point;
 uniform float radius;
-uniform float uMaskMode;   // 0.0 = additive velocity, 1.0 = saturating dye
-uniform float uRadialMode; // 0.0 = directional [dx,dy], 1.0 = radial outward (oval)
-uniform vec2 uPourDir;     // normalized pour direction in UV space (for oval anisotropy)
+uniform float uMaskMode;
+uniform float uRadialMode;
+uniform vec2 uPourDir;
 
 void main () {
   vec2 p_raw = vUv - point.xy;
   vec2 p = vec2(p_raw.x * aspectRatio, p_raw.y);
   float dist2 = dot(p, p);
 
-  // Isotropic Gaussian — used for directional and dye passes
+  // Isotropic Gaussian for directional and dye passes
   float s_iso = exp(-dist2 / radius);
 
-  // Anisotropic Gaussian — oval elongated along pour direction for radial pass.
-  // Decompose p into parallel (pour axis) and perpendicular components, then
-  // apply a tighter radius perpendicular (0.25x) so the kernel is ~2x longer
-  // along the pour than across it.
+  // Anisotropic Gaussian elongated along pour direction for radial pass
   vec2 pourDirAC = normalize(vec2(uPourDir.x * aspectRatio, uPourDir.y));
   float pPar = dot(p, pourDirAC);
   vec2 pPerpVec = p - pPar * pourDirAC;
   float pPerp2 = dot(pPerpVec, pPerpVec);
   float s_aniso = exp(-(pPar * pPar / radius + pPerp2 / (radius * 0.25)));
 
-  // Select kernel: isotropic (uRadialMode=0) or oval (uRadialMode=1)
   float s = mix(s_iso, s_aniso, uRadialMode);
 
-  // Radial outward unit vector (aspect-corrected space -> back to UV space)
+  // Radial outward unit vector (aspect-corrected -> UV space)
   vec2 outward = p / (sqrt(dist2) + 0.0001);
   vec2 radialVel = vec2(outward.x / aspectRatio, outward.y) * color.r;
 
-  // Blend: directional (uRadialMode=0) or radial outward (uRadialMode=1)
   vec2 vel = mix(color.xy, radialVel, uRadialMode);
 
-  // Content: velocity (uMaskMode=0) or raw dye color (uMaskMode=1)
   vec3 splatContent = mix(vec3(vel, 0.0), color, uMaskMode);
   vec3 splat = splatContent * s;
 
@@ -275,7 +435,7 @@ void main () {
 }
 `
 
-
+/** Curl shader: computes scalar vorticity from the velocity field. */
 const curlShader = `
 precision mediump float;
 precision mediump sampler2D;
@@ -295,6 +455,7 @@ void main () {
 }
 `
 
+/** Vorticity confinement shader: re-injects rotational energy to counter numerical dissipation. */
 const vorticityShader = `
 precision highp float;
 precision highp sampler2D;
@@ -324,6 +485,7 @@ void main () {
 }
 `
 
+/** Divergence shader: computes velocity divergence with boundary reflection. */
 const divergenceShader = `
 precision mediump float;
 precision mediump sampler2D;
@@ -348,6 +510,7 @@ void main () {
 }
 `
 
+/** Clear shader: scales the existing texture by a uniform value (used to attenuate pressure). */
 const clearShader = `
 precision mediump float;
 precision mediump sampler2D;
@@ -359,6 +522,7 @@ void main () {
 }
 `
 
+/** Jacobi pressure solver: one iteration of the pressure Poisson equation. */
 const pressureShader = `
 precision mediump float;
 precision mediump sampler2D;
@@ -380,6 +544,7 @@ void main () {
 }
 `
 
+/** Gradient subtraction shader: subtracts pressure gradient from velocity for incompressibility. */
 const gradientShader = `
 precision mediump float;
 precision mediump sampler2D;
@@ -401,6 +566,7 @@ void main () {
 }
 `
 
+/** Semi-Lagrangian advection shader with optional manual bilinear filtering fallback. */
 const advectionShader = `
 precision highp float;
 precision highp sampler2D;
@@ -434,56 +600,54 @@ void main () {
 }
 `
 
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
+
+/** Interactive latte art simulator screen with WebGL fluid dynamics and a settings HUD. */
 export const RosettaScreen = () => {
   const touchingRef = useRef(false)
   const lastTouchRef = useRef({ x: 0, y: 0 })
-  const splatStackRef = useRef<any[]>([])
+  const splatStackRef = useRef<SplatInput[]>([])
   const touchPressureRef = useRef(0)
   const pourIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pourStartTimeRef = useRef(0)
-  // Timestamp of the last move event — used to suppress the stationary interval
-  // while the finger is actively dragging.
   const lastMoveTimeRef = useRef(0)
-  // Cancellation handle for the active RAF loop — called before a new context starts
-  // so the old loop stops rather than continuing to run against a destroyed GL context.
   const cancelSimRef = useRef<(() => void) | null>(null)
 
-  // Simulation key: incrementing forces GLView to remount (full WebGL context reset)
   const [simKey, setSimKey] = useState(0)
-  // Settings modal visibility
   const [settingsVisible, setSettingsVisible] = useState(false)
-  // Local copy of adjustable config values for UI display
   const [settings, setSettings] = useState<SimSettings>({ ...DEFAULT_SETTINGS })
 
   const insets = useSafeAreaInsets()
 
-  // Adjust a setting: updates local state and mutates config so simulation picks it up immediately
+  /** Adjust a single setting by delta, clamped to [min, max]. Mutates config immediately. */
   const adjustSetting = (key: keyof SimSettings, delta: number, min: number, max: number) => {
     setSettings((prev) => {
       const next = Math.round((prev[key] + delta) * 1000) / 1000
       const clamped = Math.max(min, Math.min(max, next))
-      ;(config as any)[key] = clamped
+      ;(config as Record<string, unknown>)[key] = clamped
       return { ...prev, [key]: clamped }
     })
   }
 
+  /** Reset all settings to their initial defaults. */
   const resetSettings = () => {
     setSettings({ ...DEFAULT_SETTINGS })
     for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof SimSettings)[]) {
-      ;(config as any)[key] = DEFAULT_SETTINGS[key]
+      ;(config as Record<string, unknown>)[key] = DEFAULT_SETTINGS[key]
     }
   }
 
-  // Stationary drip: fires on interval only when the finger is held still.
-  // Suppressed automatically when onPanResponderMove is firing (lastMoveTimeRef
-  // is updated each move event; if it was recent, we skip the interval tick).
+  /**
+   * Start the stationary-drip interval. Fires every 16 ms while the finger is held still.
+   * Suppressed when onPanResponderMove fires within the last 32 ms.
+   */
   const startContinuousPouring = () => {
     if (pourIntervalRef.current) return
     pourStartTimeRef.current = Date.now()
     pourIntervalRef.current = setInterval(() => {
       if (!touchingRef.current) return
-      // Skip if a move event fired within the last 32 ms (two interval ticks) —
-      // onPanResponderMove is already generating splats with motion velocity.
       if (Date.now() - lastMoveTimeRef.current < 32) return
       const baseVel = config.SPLAT_FORCE / 25
       const pressure = touchPressureRef.current || 1.0
@@ -499,6 +663,7 @@ export const RosettaScreen = () => {
     }, 16)
   }
 
+  /** Stop the stationary-drip interval. */
   const stopContinuousPouring = () => {
     if (pourIntervalRef.current) {
       clearInterval(pourIntervalRef.current)
@@ -506,70 +671,71 @@ export const RosettaScreen = () => {
     }
   }
 
-  // Memoize PanResponder so it's created once, reading config inline
-  const panResponderRef = useRef(PanResponder.create({
-    onStartShouldSetPanResponder: () => true,
-    onStartShouldSetPanResponderCapture: () => true,
-    onMoveShouldSetPanResponder: () => true,
-    onMoveShouldSetPanResponderCapture: () => true,
-    onPanResponderGrant: (evt) => {
-      touchingRef.current = true
-      const x = evt.nativeEvent.locationX / SCREEN_WIDTH
-      const y = 1.0 - evt.nativeEvent.locationY / SCREEN_HEIGHT
-      lastTouchRef.current = { x, y }
-      const pressure = (evt.nativeEvent as any).force || 1.0
-      touchPressureRef.current = Math.max(0.1, Math.min(1.0, pressure))
-      startContinuousPouring()
-    },
-    onPanResponderMove: (evt) => {
-      if (!touchingRef.current) return
-      lastMoveTimeRef.current = Date.now()
+  /** Memoized PanResponder; reads config inline so it tracks live setting changes. */
+  const panResponderRef = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onStartShouldSetPanResponderCapture: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponderCapture: () => true,
+      onPanResponderGrant: (evt) => {
+        touchingRef.current = true
+        const x = evt.nativeEvent.locationX / SCREEN_WIDTH
+        const y = 1.0 - evt.nativeEvent.locationY / SCREEN_HEIGHT
+        lastTouchRef.current = { x, y }
+        const pressure = (evt.nativeEvent as unknown as { force?: number }).force || 1.0
+        touchPressureRef.current = Math.max(0.1, Math.min(1.0, pressure))
+        startContinuousPouring()
+      },
+      onPanResponderMove: (evt) => {
+        if (!touchingRef.current) return
+        lastMoveTimeRef.current = Date.now()
 
-      const newX = evt.nativeEvent.locationX / SCREEN_WIDTH
-      const newY = 1.0 - evt.nativeEvent.locationY / SCREEN_HEIGHT
-      const pressure = (evt.nativeEvent as any).force || 1.0
-      const p = Math.max(0.1, Math.min(1.0, pressure))
-      touchPressureRef.current = p
+        const newX = evt.nativeEvent.locationX / SCREEN_WIDTH
+        const newY = 1.0 - evt.nativeEvent.locationY / SCREEN_HEIGHT
+        const pressure = (evt.nativeEvent as unknown as { force?: number }).force || 1.0
+        const p = Math.max(0.1, Math.min(1.0, pressure))
+        touchPressureRef.current = p
 
-      const prev = { ...lastTouchRef.current }
-      const ddx = newX - prev.x
-      const ddy = newY - prev.y
-      const dist = Math.sqrt(ddx * ddx + ddy * ddy)
+        const prev = { ...lastTouchRef.current }
+        const ddx = newX - prev.x
+        const ddy = newY - prev.y
+        const dist = Math.sqrt(ddx * ddx + ddy * ddy)
 
-      // Read BASE_VELOCITY from config inline so it tracks SPLAT_FORCE changes
-      const baseVel = config.SPLAT_FORCE / 25
-      const speed = Math.max(baseVel, dist * config.SPLAT_FORCE * 0.5)
-      const vx = dist > 0 ? (ddx / dist) * speed * p : 0
-      const vy = dist > 0 ? (ddy / dist) * speed * p : -baseVel * p
+        const baseVel = config.SPLAT_FORCE / 25
+        const speed = Math.max(baseVel, dist * config.SPLAT_FORCE * 0.5)
+        const vx = dist > 0 ? (ddx / dist) * speed * p : 0
+        const vy = dist > 0 ? (ddy / dist) * speed * p : -baseVel * p
 
-      // Interpolate along the movement path so there are no gaps in the stream.
-      const step = 0.008
-      const steps = Math.max(1, Math.min(15, Math.ceil(dist / step)))
-      const elapsedTime = (Date.now() - pourStartTimeRef.current) / 1000
+        // Interpolate along the drag path to avoid gaps in the stream
+        const step = 0.008
+        const steps = Math.max(1, Math.min(15, Math.ceil(dist / step)))
+        const elapsedTime = (Date.now() - pourStartTimeRef.current) / 1000
 
-      for (let i = 1; i <= steps; i++) {
-        const t = i / steps
-        splatStackRef.current.push({
-          x: prev.x + ddx * t,
-          y: prev.y + ddy * t,
-          dx: vx,
-          dy: vy,
-          pressure: p,
-          elapsedTime,
-        })
-      }
+        for (let i = 1; i <= steps; i++) {
+          const t = i / steps
+          splatStackRef.current.push({
+            x: prev.x + ddx * t,
+            y: prev.y + ddy * t,
+            dx: vx,
+            dy: vy,
+            pressure: p,
+            elapsedTime,
+          })
+        }
 
-      lastTouchRef.current.x = newX
-      lastTouchRef.current.y = newY
-    },
-    onPanResponderRelease: () => {
-      touchingRef.current = false
-      touchPressureRef.current = 0
-      stopContinuousPouring()
-    },
-  }))
+        lastTouchRef.current.x = newX
+        lastTouchRef.current.y = newY
+      },
+      onPanResponderRelease: () => {
+        touchingRef.current = false
+        touchPressureRef.current = 0
+        stopContinuousPouring()
+      },
+    }),
+  )
 
-  // Cleanup: stop interval and cancel RAF loop on unmount
+  // Stop interval and cancel RAF loop on unmount
   useEffect(() => {
     return () => {
       stopContinuousPouring()
@@ -586,19 +752,17 @@ export const RosettaScreen = () => {
         key={simKey}
         style={{ width: SCREEN_WIDTH, height: SCREEN_HEIGHT }}
         onContextCreate={(gl) => {
-          // Cancel any previous animation loop before this new context starts.
           if (cancelSimRef.current) {
             cancelSimRef.current()
             cancelSimRef.current = null
           }
-          // Discard splats queued for the old session so they don't bleed into the reset.
           splatStackRef.current = []
           onContextCreate(gl, splatStackRef, cancelSimRef)
         }}
         {...panResponderRef.current.panHandlers}
       />
 
-      {/* HUD overlay — box-none so the bar background passes touches to GLView */}
+      {/* HUD overlay — box-none passes touches through to GLView */}
       <View
         pointerEvents="box-none"
         style={{
@@ -618,9 +782,7 @@ export const RosettaScreen = () => {
           <RNText style={{ color: 'white', fontSize: 28, lineHeight: 32 }}>‹</RNText>
         </TouchableOpacity>
         <View style={{ flex: 1, alignItems: 'center' }}>
-          <RNText style={{ color: 'white', fontSize: 17, fontFamily: 'SF-Pro-Display-Bold' }}>
-            Rosetta
-          </RNText>
+          <RNText style={{ color: 'white', fontSize: 17, fontFamily: 'SF-Pro-Display-Bold' }}>Rosetta</RNText>
         </View>
         <TouchableOpacity onPress={() => setSimKey((k) => k + 1)} style={{ padding: 8 }}>
           <RNText style={{ color: 'white', fontSize: 22 }}>↺</RNText>
@@ -641,7 +803,6 @@ export const RosettaScreen = () => {
         onRequestClose={() => setSettingsVisible(false)}
       >
         <View style={{ flex: 1, backgroundColor: 'rgb(18, 12, 8)' }}>
-          {/* Header */}
           <View
             style={{
               flexDirection: 'row',
@@ -653,16 +814,13 @@ export const RosettaScreen = () => {
               borderBottomColor: 'rgba(255,255,255,0.1)',
             }}
           >
-            <RNText
-              style={{ flex: 1, color: 'white', fontSize: 18, fontFamily: 'SF-Pro-Display-Bold' }}
-            >
+            <RNText style={{ flex: 1, color: 'white', fontSize: 18, fontFamily: 'SF-Pro-Display-Bold' }}>
               Simulation Settings
             </RNText>
             <TouchableOpacity onPress={() => setSettingsVisible(false)} style={{ padding: 4 }}>
               <RNText style={{ color: '#A0896B', fontSize: 16 }}>Done</RNText>
             </TouchableOpacity>
           </View>
-          {/* Setting rows */}
           <ScrollView style={{ flex: 1 }}>
             {SETTING_DEFS.map(({ label, key, min, max, step }) => {
               const decimals = step < 1 ? 2 : 0
@@ -692,9 +850,7 @@ export const RosettaScreen = () => {
                   >
                     <RNText style={{ color: 'white', fontSize: 20, lineHeight: 24 }}>−</RNText>
                   </TouchableOpacity>
-                  <RNText
-                    style={{ color: 'white', fontSize: 15, width: 56, textAlign: 'center' }}
-                  >
+                  <RNText style={{ color: 'white', fontSize: 15, width: 56, textAlign: 'center' }}>
                     {settings[key].toFixed(decimals)}
                   </RNText>
                   <TouchableOpacity
@@ -734,55 +890,69 @@ export const RosettaScreen = () => {
   )
 }
 
+// ---------------------------------------------------------------------------
+// WebGL Simulation Engine
+// ---------------------------------------------------------------------------
+
+/**
+ * Initializes the WebGL fluid simulation pipeline and starts the render loop.
+ * @param gl - The WebGL rendering context from expo-gl.
+ * @param splatStackRef - Shared ref holding pending splat inputs from touch events.
+ * @param cancelSimRef - Ref whose value, when called, stops the RAF loop.
+ */
 function onContextCreate(
   gl: WebGLRenderingContext,
-  splatStackRef: React.MutableRefObject<any[]>,
-  cancelSimRef: React.MutableRefObject<(() => void) | null>,
+  splatStackRef: React.RefObject<SplatInput[]>,
+  cancelSimRef: React.RefObject<(() => void) | null>,
 ) {
-  // Utilities
-  function getWebGLContext(gl: any) {
-    const isWebGL2 = typeof WebGL2RenderingContext !== 'undefined' && gl instanceof WebGL2RenderingContext
-    let halfFloat: any
-    let supportLinearFiltering: any
+  // --- WebGL capability detection ---
+
+  function getWebGLContext(glCtx: WebGLRenderingContext): { gl: WebGLRenderingContext; ext: GLExtensions } {
+    const isWebGL2 = typeof WebGL2RenderingContext !== 'undefined' && glCtx instanceof WebGL2RenderingContext
+    let halfFloat: { HALF_FLOAT_OES: number } | null
+    let supportLinearFiltering: unknown
     if (isWebGL2) {
-      gl.getExtension('EXT_color_buffer_float')
-      supportLinearFiltering = gl.getExtension('OES_texture_float_linear')
+      glCtx.getExtension('EXT_color_buffer_float')
+      supportLinearFiltering = glCtx.getExtension('OES_texture_float_linear')
     } else {
-      halfFloat = gl.getExtension('OES_texture_half_float')
-      supportLinearFiltering = gl.getExtension('OES_texture_half_float_linear')
+      halfFloat = glCtx.getExtension('OES_texture_half_float') as { HALF_FLOAT_OES: number } | null
+      supportLinearFiltering = glCtx.getExtension('OES_texture_half_float_linear')
     }
-    const halfFloatTexType = isWebGL2 ? (gl as any).HALF_FLOAT : (halfFloat as any).HALF_FLOAT_OES
-    let formatRGBA: any
-    let formatRG: any
-    let formatR: any
+    const halfFloatTexType = isWebGL2
+      ? (glCtx as unknown as { HALF_FLOAT: number }).HALF_FLOAT
+      : halfFloat!.HALF_FLOAT_OES
+    let formatRGBA: TextureFormat | null
+    let formatRG: TextureFormat | null
+    let formatR: TextureFormat | null
     if (isWebGL2) {
-      formatRGBA = getSupportedFormat(gl, gl.RGBA16F, gl.RGBA, halfFloatTexType)
-      formatRG = getSupportedFormat(gl, gl.RG16F, gl.RG, halfFloatTexType)
-      formatR = getSupportedFormat(gl, gl.R16F, gl.RED, halfFloatTexType)
+      const gl2 = glCtx as unknown as WebGL2RenderingContext
+      formatRGBA = getSupportedFormat(glCtx, gl2.RGBA16F, glCtx.RGBA, halfFloatTexType)
+      formatRG = getSupportedFormat(glCtx, gl2.RG16F, gl2.RG, halfFloatTexType)
+      formatR = getSupportedFormat(glCtx, gl2.R16F, gl2.RED, halfFloatTexType)
     } else {
-      formatRGBA = getSupportedFormat(gl, gl.RGBA, gl.RGBA, halfFloatTexType)
-      formatRG = getSupportedFormat(gl, gl.RGBA, gl.RGBA, halfFloatTexType)
-      formatR = getSupportedFormat(gl, gl.RGBA, gl.RGBA, halfFloatTexType)
+      formatRGBA = getSupportedFormat(glCtx, glCtx.RGBA, glCtx.RGBA, halfFloatTexType)
+      formatRG = getSupportedFormat(glCtx, glCtx.RGBA, glCtx.RGBA, halfFloatTexType)
+      formatR = getSupportedFormat(glCtx, glCtx.RGBA, glCtx.RGBA, halfFloatTexType)
     }
     return {
-      gl,
-      ext: {
-        formatRGBA,
-        formatRG,
-        formatR,
-        halfFloatTexType,
-        supportLinearFiltering,
-      },
+      gl: glCtx,
+      ext: { formatRGBA, formatRG, formatR, halfFloatTexType, supportLinearFiltering },
     }
   }
 
-  function getSupportedFormat(gl: any, internalFormat: number, format: number, type: number) {
-    if (!supportRenderTextureFormat(gl, internalFormat, format, type)) {
+  function getSupportedFormat(
+    glCtx: WebGLRenderingContext,
+    internalFormat: number,
+    format: number,
+    type: number,
+  ): TextureFormat | null {
+    if (!supportRenderTextureFormat(glCtx, internalFormat, format, type)) {
+      const gl2 = glCtx as unknown as WebGL2RenderingContext
       switch (internalFormat) {
-        case (gl as any).R16F:
-          return getSupportedFormat(gl, (gl as any).RG16F, (gl as any).RG, type)
-        case (gl as any).RG16F:
-          return getSupportedFormat(gl, (gl as any).RGBA16F, (gl as any).RGBA, type)
+        case gl2.R16F:
+          return getSupportedFormat(glCtx, gl2.RG16F, gl2.RG, type)
+        case gl2.RG16F:
+          return getSupportedFormat(glCtx, gl2.RGBA16F, glCtx.RGBA, type)
         default:
           return null
       }
@@ -790,22 +960,27 @@ function onContextCreate(
     return { internalFormat, format }
   }
 
-  function supportRenderTextureFormat(gl: any, internalFormat: number, format: number, type: number) {
-    const texture = gl.createTexture()
-    gl.bindTexture(gl.TEXTURE_2D, texture)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-    gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, 4, 4, 0, format, type, null)
-    const fbo = gl.createFramebuffer()
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo)
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0)
-    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER)
-    return status === gl.FRAMEBUFFER_COMPLETE
+  function supportRenderTextureFormat(
+    glCtx: WebGLRenderingContext,
+    internalFormat: number,
+    format: number,
+    type: number,
+  ): boolean {
+    const texture = glCtx.createTexture()
+    glCtx.bindTexture(glCtx.TEXTURE_2D, texture)
+    glCtx.texParameteri(glCtx.TEXTURE_2D, glCtx.TEXTURE_MIN_FILTER, glCtx.NEAREST)
+    glCtx.texParameteri(glCtx.TEXTURE_2D, glCtx.TEXTURE_MAG_FILTER, glCtx.NEAREST)
+    glCtx.texParameteri(glCtx.TEXTURE_2D, glCtx.TEXTURE_WRAP_S, glCtx.CLAMP_TO_EDGE)
+    glCtx.texParameteri(glCtx.TEXTURE_2D, glCtx.TEXTURE_WRAP_T, glCtx.CLAMP_TO_EDGE)
+    glCtx.texImage2D(glCtx.TEXTURE_2D, 0, internalFormat, 4, 4, 0, format, type, null)
+    const fbo = glCtx.createFramebuffer()
+    glCtx.bindFramebuffer(glCtx.FRAMEBUFFER, fbo)
+    glCtx.framebufferTexture2D(glCtx.FRAMEBUFFER, glCtx.COLOR_ATTACHMENT0, glCtx.TEXTURE_2D, texture, 0)
+    const status = glCtx.checkFramebufferStatus(glCtx.FRAMEBUFFER)
+    return status === glCtx.FRAMEBUFFER_COMPLETE
   }
 
-  function getResolution(gl: any, resolution: number) {
+  function getResolution(resolution: number): { width: number; height: number } {
     let aspectRatio = gl.drawingBufferWidth / gl.drawingBufferHeight
     if (aspectRatio < 1) aspectRatio = 1.0 / aspectRatio
     const min = Math.round(resolution)
@@ -814,15 +989,18 @@ function onContextCreate(
     else return { width: min, height: max }
   }
 
-  const { gl: glContext, ext } = getWebGLContext(gl)
+  const { ext } = getWebGLContext(gl)
 
   if (!ext.supportLinearFiltering) {
     config.DYE_RESOLUTION = 512
   }
 
-  // Shader compile/link helpers
-  function compileShader(type: number, source: string, keywords: string[] | null) {
-    source = addKeywords(source, keywords)
+  // --- Shader compilation ---
+
+  function compileShader(type: number, source: string, keywords: string[] | null): WebGLShader {
+    if (keywords != null) {
+      source = keywords.map((k) => '#define ' + k + '\n').join('') + source
+    }
     const shader = gl.createShader(type)!
     gl.shaderSource(shader, source)
     gl.compileShader(shader)
@@ -830,51 +1008,39 @@ function onContextCreate(
     return shader
   }
 
-  function addKeywords(source: string, keywords: string[] | null) {
-    if (keywords == null) return source
-    let keywordsString = ''
-    keywords.forEach((k) => {
-      keywordsString += '#define ' + k + '\n'
-    })
-    return keywordsString + source
-  }
-
-  function createProgram(vertexShader: WebGLShader, fragmentShader: WebGLShader) {
+  function createProgram(vertexShader: WebGLShader, fragmentShader: WebGLShader): WebGLProgram {
     const program = gl.createProgram()!
     gl.attachShader(program, vertexShader)
     gl.attachShader(program, fragmentShader)
-    // Bind attribute 0 to aPosition for safety in some drivers
     gl.bindAttribLocation(program, 0, 'aPosition')
     gl.linkProgram(program)
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) console.trace(gl.getProgramInfoLog(program))
     return program
   }
 
-  function getUniforms(program: WebGLProgram) {
-    const uniforms: any = []
+  function getUniforms(program: WebGLProgram): Record<string, WebGLUniformLocation | null> {
+    const uniforms: Record<string, WebGLUniformLocation | null> = {}
     const uniformCount = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS)
     for (let i = 0; i < uniformCount; i++) {
       const info = gl.getActiveUniform(program, i)!
-      const name = info.name
-      uniforms[name] = gl.getUniformLocation(program, name)
+      uniforms[info.name] = gl.getUniformLocation(program, info.name)
     }
     return uniforms
   }
 
-  class Program {
-    uniforms: any
-    program: WebGLProgram
-    constructor(vertexShader: WebGLShader, fragmentShader: WebGLShader) {
-      this.uniforms = {}
-      this.program = createProgram(vertexShader, fragmentShader)
-      this.uniforms = getUniforms(this.program)
-    }
-    bind() {
-      gl.useProgram(this.program)
+  function makeProgram(vertexShader: WebGLShader, fragmentShader: WebGLShader): GLProgram {
+    const program = createProgram(vertexShader, fragmentShader)
+    const uniforms = getUniforms(program)
+    return {
+      uniforms,
+      program,
+      bind() {
+        gl.useProgram(program)
+      },
     }
   }
 
-  // Compile shaders
+  // Compile all shaders
   const baseVertex = compileShader(gl.VERTEX_SHADER, baseVertexShader, ['baseVertex'])
   const splatFrag = compileShader(gl.FRAGMENT_SHADER, splatShader, ['splatFrag'])
   const displayFrag = compileShader(gl.FRAGMENT_SHADER, displayShader, ['displayFrag'])
@@ -890,18 +1056,18 @@ function onContextCreate(
     ext.supportLinearFiltering ? null : ['MANUAL_FILTERING'],
   )
 
-  // Create programs
-  const splatProgram = new Program(baseVertex, splatFrag)
-  const displayProgram = new Program(baseVertex, displayFrag)
-  const curlProgram = new Program(baseVertex, curlFrag)
-  const vorticityProgram = new Program(baseVertex, vorticityFrag)
-  const divergenceProgram = new Program(baseVertex, divergenceFrag)
-  const clearProgram = new Program(baseVertex, clearFrag)
-  const pressureProgram = new Program(baseVertex, pressureFrag)
-  const gradientSubtractProgram = new Program(baseVertex, gradientFrag)
-  const advectionProgram = new Program(baseVertex, advectionFrag)
+  const splatProgram = makeProgram(baseVertex, splatFrag)
+  const displayProgram = makeProgram(baseVertex, displayFrag)
+  const curlProgram = makeProgram(baseVertex, curlFrag)
+  const vorticityProgram = makeProgram(baseVertex, vorticityFrag)
+  const divergenceProgram = makeProgram(baseVertex, divergenceFrag)
+  const clearProgram = makeProgram(baseVertex, clearFrag)
+  const pressureProgram = makeProgram(baseVertex, pressureFrag)
+  const gradientSubtractProgram = makeProgram(baseVertex, gradientFrag)
+  const advectionProgram = makeProgram(baseVertex, advectionFrag)
 
-  // Fullscreen triangle/quad blit
+  // --- Fullscreen blit ---
+
   const blit = (() => {
     gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer())
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, -1, 1, 1, 1, 1, -1]), gl.STATIC_DRAW)
@@ -909,7 +1075,7 @@ function onContextCreate(
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0, 1, 2, 0, 2, 3]), gl.STATIC_DRAW)
     gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0)
     gl.enableVertexAttribArray(0)
-    return (target: any, clear = false) => {
+    return (target: FBO | null, clear = false) => {
       if (target == null) {
         gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight)
         gl.bindFramebuffer(gl.FRAMEBUFFER, null)
@@ -917,11 +1083,9 @@ function onContextCreate(
         gl.viewport(0, 0, target.width, target.height)
         gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo)
       }
-      // Provide texel size to vertex shader
       const texelX = target ? 1.0 / target.width : 1.0 / gl.drawingBufferWidth
       const texelY = target ? 1.0 / target.height : 1.0 / gl.drawingBufferHeight
-      // Set on whichever program is currently bound (they all declare texelSize)
-      const currentProgram: any = (gl as any).getParameter(gl.CURRENT_PROGRAM)
+      const currentProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null
       if (currentProgram) {
         const loc = gl.getUniformLocation(currentProgram, 'texelSize')
         if (loc) gl.uniform2f(loc, texelX, texelY)
@@ -935,13 +1099,15 @@ function onContextCreate(
     }
   })()
 
-  // FBO helpers
-  function createFBO(w: number, h: number, internalFormat: number, format: number, type: number, param: number) {
+  // --- FBO helpers ---
+
+  function createFBO(params: CreateFBOParams): FBO {
+    const { w, h, internalFormat, format, type, filtering } = params
     gl.activeTexture(gl.TEXTURE0)
     const texture = gl.createTexture()!
     gl.bindTexture(gl.TEXTURE_2D, texture)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, param)
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, param)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filtering)
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filtering)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
     gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, type, null)
@@ -950,15 +1116,13 @@ function onContextCreate(
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0)
     gl.viewport(0, 0, w, h)
     gl.clear(gl.COLOR_BUFFER_BIT)
-    const texelSizeX = 1.0 / w
-    const texelSizeY = 1.0 / h
     return {
       texture,
       fbo,
       width: w,
       height: h,
-      texelSizeX,
-      texelSizeY,
+      texelSizeX: 1.0 / w,
+      texelSizeY: 1.0 / h,
       attach(id: number) {
         gl.activeTexture(gl.TEXTURE0 + id)
         gl.bindTexture(gl.TEXTURE_2D, texture)
@@ -967,12 +1131,12 @@ function onContextCreate(
     }
   }
 
-  function createDoubleFBO(w: number, h: number, internalFormat: number, format: number, type: number, param: number) {
-    let fbo1 = createFBO(w, h, internalFormat, format, type, param)
-    let fbo2 = createFBO(w, h, internalFormat, format, type, param)
+  function createDoubleFBO(params: CreateFBOParams): DoubleFBO {
+    let fbo1 = createFBO(params)
+    let fbo2 = createFBO(params)
     return {
-      width: w,
-      height: h,
+      width: params.w,
+      height: params.h,
       texelSizeX: fbo1.texelSizeX,
       texelSizeY: fbo1.texelSizeY,
       get read() {
@@ -995,52 +1159,80 @@ function onContextCreate(
     }
   }
 
-  // Framebuffers
-  let dye: any
-  let velocity: any
-  let curl: any
-  let divergence: any
-  let pressure: any
+  // --- Framebuffers ---
+
+  let dye: DoubleFBO
+  let velocity: DoubleFBO
+  let curl: FBO
+  let divergence: FBO
+  let pressure: DoubleFBO
 
   function initFramebuffers() {
-    const simRes = getResolution(gl, config.SIM_RESOLUTION)
-    const dyeRes = getResolution(gl, config.DYE_RESOLUTION)
+    const simRes = getResolution(config.SIM_RESOLUTION)
+    const dyeRes = getResolution(config.DYE_RESOLUTION)
     const texType = ext.halfFloatTexType
-    const rgba = ext.formatRGBA
-    const rg = ext.formatRG
-    const r = ext.formatR
+    const rgba = ext.formatRGBA!
+    const rg = ext.formatRG!
+    const r = ext.formatR!
     const filtering = ext.supportLinearFiltering ? gl.LINEAR : gl.NEAREST
     gl.disable(gl.BLEND)
 
     if (dye == null)
-      dye = createDoubleFBO(dyeRes.width, dyeRes.height, rgba.internalFormat, rgba.format, texType, filtering)
-
+      dye = createDoubleFBO({
+        w: dyeRes.width,
+        h: dyeRes.height,
+        internalFormat: rgba.internalFormat,
+        format: rgba.format,
+        type: texType,
+        filtering,
+      })
     if (velocity == null)
-      velocity = createDoubleFBO(simRes.width, simRes.height, rg.internalFormat, rg.format, texType, filtering)
-    // Always allocate the curl FBO so the CURL setting can be changed at runtime without crashing.
-  if (curl == null)
-    curl = createFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST)
+      velocity = createDoubleFBO({
+        w: simRes.width,
+        h: simRes.height,
+        internalFormat: rg.internalFormat,
+        format: rg.format,
+        type: texType,
+        filtering,
+      })
+    if (curl == null)
+      curl = createFBO({
+        w: simRes.width,
+        h: simRes.height,
+        internalFormat: r.internalFormat,
+        format: r.format,
+        type: texType,
+        filtering: gl.NEAREST,
+      })
     if (divergence == null)
-      divergence = createFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST)
+      divergence = createFBO({
+        w: simRes.width,
+        h: simRes.height,
+        internalFormat: r.internalFormat,
+        format: r.format,
+        type: texType,
+        filtering: gl.NEAREST,
+      })
     if (pressure == null)
-      pressure = createDoubleFBO(simRes.width, simRes.height, r.internalFormat, r.format, texType, gl.NEAREST)
-
+      pressure = createDoubleFBO({
+        w: simRes.width,
+        h: simRes.height,
+        internalFormat: r.internalFormat,
+        format: r.format,
+        type: texType,
+        filtering: gl.NEAREST,
+      })
   }
 
-  // Simulation splat: injects momentum (additive) and deposits milk mask (saturating toward white).
-  // - Velocity path keeps fluid motion lively.
-  // - Milk mask uses a saturating blend to avoid transparent “holes” and maintain a creamy look.
-  // - Optional radialForce injects a radial outward velocity pass before the directional pass.
-  function splat(
-    x: number,
-    y: number,
-    dx: number,
-    dy: number,
-    color: { r: number; g: number; b: number },
-    customRadiusPct?: number,
-    radialForce?: number,
-  ) {
-    const radius = (customRadiusPct !== undefined ? customRadiusPct : config.SPLAT_RADIUS) / 10000.0
+  // --- Simulation ---
+
+  /**
+   * Inject a splat into the velocity and dye fields.
+   * Three GPU passes: radial push (optional), directional velocity, milk mask deposit.
+   */
+  function splat(params: SplatParams) {
+    const { x, y, dx, dy, color, radiusPct, radialForce } = params
+    const radius = (radiusPct !== undefined ? radiusPct : config.SPLAT_RADIUS) / 10000.0
 
     splatProgram.bind()
     gl.uniform1i(splatProgram.uniforms.uTarget, velocity.read.attach(0))
@@ -1048,13 +1240,12 @@ function onContextCreate(
     gl.uniform2f(splatProgram.uniforms.point, x, y)
     gl.uniform1f(splatProgram.uniforms.uMaskMode, 0.0)
 
-    // Normalized pour direction for oval anisotropy (fallback to downward if stationary)
     const len = Math.sqrt(dx * dx + dy * dy)
     const pourDirX = len > 0.0001 ? dx / len : 0.0
     const pourDirY = len > 0.0001 ? dy / len : -1.0
     gl.uniform2f(splatProgram.uniforms.uPourDir, pourDirX, pourDirY)
 
-    // Pass 1 (radial): oval outward displacement zone; color.r = force magnitude
+    // Pass 1: radial outward displacement (oval kernel)
     if (radialForce != null && radialForce > 0) {
       gl.uniform3f(splatProgram.uniforms.color, radialForce, 0.0, 0.0)
       gl.uniform1f(splatProgram.uniforms.radius, radius * 8.0)
@@ -1070,7 +1261,7 @@ function onContextCreate(
     blit(velocity.write)
     velocity.swap()
 
-    // Pass 3: milk mask deposit (uMaskMode=1 → saturating; uRadialMode irrelevant here)
+    // Pass 3: milk mask deposit (saturating blend)
     gl.uniform1i(splatProgram.uniforms.uTarget, dye.read.attach(0))
     gl.uniform3f(splatProgram.uniforms.color, color.r, color.g, color.b)
     gl.uniform1f(splatProgram.uniforms.uMaskMode, 1.0)
@@ -1078,31 +1269,25 @@ function onContextCreate(
     dye.swap()
   }
 
-  // Apply pending input splats from the queue.
-  // This function keeps responsiveness high by adapting the number of processed
-  // splats per frame to the current backlog, with an upper bound for performance.
+  /** Drain pending splats from the queue, adaptively capped per frame for performance. */
   function applyInputs() {
     const qlen = splatStackRef.current?.length ?? 0
-    // Adaptively process more when backlog builds, capped for perf
     const maxSplatsPerFrame = Math.min(8, Math.max(2, Math.ceil(qlen / 4)))
     let processed = 0
     while ((splatStackRef.current?.length ?? 0) > 0 && processed < maxSplatsPerFrame) {
-      const s = splatStackRef.current.shift()
-      // Wider contact patch over time to emulate a pitcher lowering toward the surface.
-      // Starts at SPLAT_RADIUS (user-adjustable) and grows by up to 2.8% over the pour duration.
+      const s = splatStackRef.current!.shift()!
       const radiusPct = config.SPLAT_RADIUS + Math.min(2.8, s.elapsedTime * 2.2)
       const speed = Math.sqrt(s.dx * s.dx + s.dy * s.dy)
       const radialForce = speed * config.RADIAL_PUSH
-      splat(s.x, s.y, s.dx, s.dy, config.MILK_COLOR, radiusPct, radialForce)
+      splat({ x: s.x, y: s.y, dx: s.dx, dy: s.dy, color: config.MILK_COLOR, radiusPct, radialForce })
       processed++
     }
   }
 
-  // Composite dye (milk mask) over espresso with lighting and valley-driven reveal.
-  function drawDisplay(target: any) {
+  /** Render the display shader: composites dye over espresso with lighting. */
+  function drawDisplay(target: FBO | null) {
     displayProgram.bind()
     gl.uniform1i(displayProgram.uniforms.uTexture, dye.read.attach(0))
-    // We'll rely on matching source/target sizes; blit sets texelSize for neighbors.
     gl.uniform3f(
       displayProgram.uniforms.uEspresso,
       config.ESPRESSO_COLOR.r,
@@ -1118,23 +1303,19 @@ function onContextCreate(
     gl.uniform1f(displayProgram.uniforms.uMaskHarden, config.MASK_HARDEN)
     gl.uniform1f(displayProgram.uniforms.uFoamAbsorption, config.FOAM_ABSORPTION)
     gl.uniform1f(displayProgram.uniforms.uSpecularClamp, config.SPECULAR_CLAMP)
-
     blit(target)
   }
 
-
-
+  /** Execute one full simulation step: curl → vorticity → divergence → pressure → gradient → advection. */
   function step(dt: number) {
     gl.disable(gl.BLEND)
 
     if (config.CURL !== 0) {
-      // Curl
       curlProgram.bind()
       gl.uniform2f(curlProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
       gl.uniform1i(curlProgram.uniforms.uVelocity, velocity.read.attach(0))
       blit(curl)
 
-      // Vorticity confinement
       vorticityProgram.bind()
       gl.uniform2f(vorticityProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
       gl.uniform1i(vorticityProgram.uniforms.uVelocity, velocity.read.attach(0))
@@ -1145,20 +1326,17 @@ function onContextCreate(
       velocity.swap()
     }
 
-    // Divergence
     divergenceProgram.bind()
     gl.uniform2f(divergenceProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
     gl.uniform1i(divergenceProgram.uniforms.uVelocity, velocity.read.attach(0))
     blit(divergence)
 
-    // Clear pressure
     clearProgram.bind()
     gl.uniform1i(clearProgram.uniforms.uTexture, pressure.read.attach(0))
     gl.uniform1f(clearProgram.uniforms.value, config.PRESSURE)
     blit(pressure.write)
     pressure.swap()
 
-    // Pressure solve
     pressureProgram.bind()
     gl.uniform2f(pressureProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
     gl.uniform1i(pressureProgram.uniforms.uDivergence, divergence.attach(0))
@@ -1168,7 +1346,6 @@ function onContextCreate(
       pressure.swap()
     }
 
-    // Gradient subtract
     gradientSubtractProgram.bind()
     gl.uniform2f(gradientSubtractProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
     gl.uniform1i(gradientSubtractProgram.uniforms.uPressure, pressure.read.attach(0))
@@ -1189,7 +1366,7 @@ function onContextCreate(
     blit(velocity.write)
     velocity.swap()
 
-    // Advection
+    // Advect dye (milk mask)
     if (!ext.supportLinearFiltering)
       gl.uniform2f(advectionProgram.uniforms.dyeTexelSize, dye.texelSizeX, dye.texelSizeY)
     gl.uniform1i(advectionProgram.uniforms.uVelocity, velocity.read.attach(0))
@@ -1200,25 +1377,19 @@ function onContextCreate(
     dye.swap()
   }
 
-  function render(target: any) {
-    drawDisplay(target)
-  }
+  // --- Init and render loop ---
 
-  // Init
   initFramebuffers()
 
   let lastUpdateTime = Date.now()
-  function calcDeltaTime() {
+  function calcDeltaTime(): number {
     const now = Date.now()
     let dt = (now - lastUpdateTime) / 1000
-    dt = Math.min(dt, 0.033) // cap at ~30fps — allows real-time sim speed down to 30fps
+    dt = Math.min(dt, 0.033)
     lastUpdateTime = now
     return dt
   }
 
-  // Cancellation flag: set to true by cancelSimRef.current() when a new GL context
-  // is created (GLView remounts after simKey increment). Stops the loop from
-  // running against a destroyed context, preventing CPU/GPU resource leaks.
   let cancelled = false
   cancelSimRef.current = () => {
     cancelled = true
@@ -1229,11 +1400,10 @@ function onContextCreate(
     const dt = calcDeltaTime()
     applyInputs()
     if (!config.PAUSED) step(dt)
-    render(null)
+    drawDisplay(null)
     try {
-      ;(gl as any).endFrameEXP()
+      ;(gl as unknown as { endFrameEXP: () => void }).endFrameEXP()
     } catch {
-      // GL context was destroyed (GLView unmounted) — stop the loop gracefully.
       cancelled = true
       return
     }
