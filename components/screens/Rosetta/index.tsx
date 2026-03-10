@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { View, Dimensions, PanResponder, Modal, TouchableOpacity, Text as RNText, ScrollView, Platform } from 'react-native'
 import { GLView } from 'expo-gl'
 import { router } from 'expo-router'
@@ -34,7 +34,7 @@ const SCREEN_HEIGHT = Dimensions.get('screen').height
 // Global configuration for the latte art simulator.
 // Adjust these to balance realism, sharpness, and performance.
 const config = {
-  SIM_RESOLUTION: 512,
+  SIM_RESOLUTION: 256,
   DYE_RESOLUTION: 512,
   CAPTURE_RESOLUTION: 1024,
 
@@ -42,13 +42,13 @@ const config = {
   DENSITY_DISSIPATION: 0, // milk shouldn't fade
   VELOCITY_DISSIPATION: 1, // thicker flow
   PRESSURE: 1,
-  PRESSURE_ITERATIONS: 1, // better incompressibility for smoother motion
+  PRESSURE_ITERATIONS: 10, // 10 iterations: good incompressibility without heavy GPU cost
   CURL: 0, // gentle roll for leaf edges
 
   // Pour tuning (percent of screen width/height in splat())
   SPLAT_RADIUS: 1.2, // ~1.2% starting radius; widened over time in applyInputs()
-  SPLAT_FORCE: 150,
-  RADIAL_PUSH: 2.5,    // froth displacement intensity; scales with pour velocity
+  SPLAT_FORCE: 200,
+  RADIAL_PUSH: 3.0,    // froth displacement intensity; scales with pour velocity
   FOAM_ABSORPTION: 1.0, // Beer-Lambert absorption coefficient; higher = foam turns opaque faster
                     // VELOCITY_DISSIPATION is the surface-tension settling speed
 
@@ -59,7 +59,7 @@ const config = {
   SPECULAR_POWER: 48.0, // shininess for spec term
   SPECULAR_CLAMP: 0.48, // clamp spec contribution to avoid white jaggies
   MILK_OPACITY: 1.0, // allow a hint of espresso to bleed through thin milk
-  CREMA_STRENGTH: 0.0, // granular crema texture on espresso surface
+  CREMA_STRENGTH: 0.08, // granular crema texture on espresso surface
   ESPRESSO_COLOR: { r: 0.14, g: 0.055, b: 0.014 }, // deep espresso brown (dark in linear = rich on screen)
   MILK_COLOR: { r: 1.0, g: 0.98, b: 0.96 },         // bright neutral white foam
   VALLEY_STRENGTH: 0.90, // espresso shows through thin milk (key for latte art lines)
@@ -77,18 +77,41 @@ type SimSettings = {
   MASK_HARDEN: number
   RADIAL_PUSH: number
   FOAM_ABSORPTION: number
+  CREMA_STRENGTH: number
+  MILK_OPACITY: number
+  MILK_SPECULAR: number
+  SPECULAR_POWER: number
 }
 
 const SETTING_DEFS: { label: string; key: keyof SimSettings; min: number; max: number; step: number }[] = [
   { label: 'Pour Width', key: 'SPLAT_RADIUS', min: 0.5, max: 4.0, step: 0.1 },
   { label: 'Pour Force', key: 'SPLAT_FORCE', min: 50, max: 300, step: 10 },
-  { label: 'Flow Thickness', key: 'VELOCITY_DISSIPATION', min: 0, max: 2, step: 0.1 },
+  { label: 'Flow Decay', key: 'VELOCITY_DISSIPATION', min: 0, max: 2, step: 0.1 },
   { label: 'Swirl', key: 'CURL', min: 0, max: 5, step: 0.5 },
   { label: 'Edge Definition', key: 'VALLEY_STRENGTH', min: 0, max: 1, step: 0.05 },
   { label: 'Milk Boundary', key: 'MASK_HARDEN', min: 0, max: 1, step: 0.05 },
   { label: 'Radial Push', key: 'RADIAL_PUSH', min: 0, max: 5, step: 0.25 },
   { label: 'Foam Absorption', key: 'FOAM_ABSORPTION', min: 0, max: 2, step: 0.1 },
+  { label: 'Crema Texture', key: 'CREMA_STRENGTH', min: 0, max: 0.3, step: 0.02 },
+  { label: 'Milk Opacity', key: 'MILK_OPACITY', min: 0.5, max: 1.0, step: 0.05 },
+  { label: 'Milk Shine', key: 'MILK_SPECULAR', min: 0, max: 0.6, step: 0.02 },
+  { label: 'Shine Focus', key: 'SPECULAR_POWER', min: 8, max: 128, step: 4 },
 ]
+
+const DEFAULT_SETTINGS: SimSettings = {
+  SPLAT_RADIUS: config.SPLAT_RADIUS,
+  SPLAT_FORCE: config.SPLAT_FORCE,
+  VELOCITY_DISSIPATION: config.VELOCITY_DISSIPATION,
+  CURL: config.CURL,
+  VALLEY_STRENGTH: config.VALLEY_STRENGTH,
+  MASK_HARDEN: config.MASK_HARDEN,
+  RADIAL_PUSH: config.RADIAL_PUSH,
+  FOAM_ABSORPTION: config.FOAM_ABSORPTION,
+  CREMA_STRENGTH: config.CREMA_STRENGTH,
+  MILK_OPACITY: config.MILK_OPACITY,
+  MILK_SPECULAR: config.MILK_SPECULAR,
+  SPECULAR_POWER: config.SPECULAR_POWER,
+}
 
 // Shaders
 const baseVertexShader = `
@@ -134,6 +157,7 @@ uniform float uMilkSpecular;
 uniform float uSpecularPower;
 uniform float uMaskHarden;     // 0 = soft linear blend, 1 = crisp smoothstep boundary
 uniform float uFoamAbsorption; // Beer-Lambert k: opacity = 1 - exp(-k * thickness)
+uniform float uSpecularClamp;  // clamp spec contribution to avoid white jaggies
 
 float hash21(vec2 p) {
   return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -161,7 +185,8 @@ void main () {
 
   // Valley: Laplacian of raw mask (positive at local minima = thin milk pits)
   float laplacian = ml + mr + mt + mb - 4.0 * m;
-  float valley = clamp(laplacian * uValleyStrength * 10.0, 0.0, 1.0);
+  float valleyScale = 10.0 / (length(texelSize) * 512.0);
+  float valley = clamp(laplacian * uValleyStrength * valleyScale, 0.0, 1.0);
   float mask = mBlur;
 
   // Beer-Lambert: foam as a scattering medium where opacity = 1 - exp(-k * thickness).
@@ -179,17 +204,19 @@ void main () {
   // Lighting from gradient of blurred mask
   float dx = mr - ml;
   float dy = mt - mb;
-  vec3 n = normalize(vec3(dx, dy, length(texelSize)));
-  vec3 lightDir = normalize(vec3(0.0, 0.0, 1.0));
+  vec3 n = normalize(vec3(dx, dy, 0.15));
+  vec3 lightDir = normalize(vec3(0.2, 0.3, 1.0));
   float diff = clamp(dot(n, lightDir), 0.0, 1.0);
 
   // Crema noise on espresso
   float crema = 1.0 - uCremaStrength * hash21(floor(vUv * 256.0));
   vec3 espresso = uEspresso * crema;
 
-  // Milk shading with specular highlight
-  float spec = pow(max(n.z, 0.0), uSpecularPower) * uMilkSpecular * mask;
-  vec3 milkCol = uMilk * (0.8 + 0.2 * diff) + spec;
+  // Milk shading with specular highlight (gated by maskAlpha, not raw mask)
+  float spec = pow(max(n.z, 0.0), uSpecularPower) * uMilkSpecular * maskAlpha;
+  spec = min(spec, uSpecularClamp);
+  vec3 warmSpec = spec * vec3(1.0, 0.97, 0.92);
+  vec3 milkCol = uMilk * (0.8 + 0.2 * diff) + warmSpec;
   vec3 c = mix(espresso, clamp(milkCol, 0.0, 1.0), maskAlpha);
   gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }
@@ -426,16 +453,7 @@ export const RosettaScreen = () => {
   // Settings modal visibility
   const [settingsVisible, setSettingsVisible] = useState(false)
   // Local copy of adjustable config values for UI display
-  const [settings, setSettings] = useState<SimSettings>({
-    SPLAT_RADIUS: config.SPLAT_RADIUS,
-    SPLAT_FORCE: config.SPLAT_FORCE,
-    VELOCITY_DISSIPATION: config.VELOCITY_DISSIPATION,
-    CURL: config.CURL,
-    VALLEY_STRENGTH: config.VALLEY_STRENGTH,
-    MASK_HARDEN: config.MASK_HARDEN,
-    RADIAL_PUSH: config.RADIAL_PUSH,
-    FOAM_ABSORPTION: config.FOAM_ABSORPTION,
-  })
+  const [settings, setSettings] = useState<SimSettings>({ ...DEFAULT_SETTINGS })
 
   const insets = useSafeAreaInsets()
 
@@ -449,9 +467,12 @@ export const RosettaScreen = () => {
     })
   }
 
-  // BASE_VELOCITY is derived from SPLAT_FORCE so the config knob actually controls push strength.
-  // SPLAT_FORCE / 25 maps the default of 200 → 8 units of velocity.
-  const BASE_VELOCITY = config.SPLAT_FORCE / 25
+  const resetSettings = () => {
+    setSettings({ ...DEFAULT_SETTINGS })
+    for (const key of Object.keys(DEFAULT_SETTINGS) as (keyof SimSettings)[]) {
+      ;(config as any)[key] = DEFAULT_SETTINGS[key]
+    }
+  }
 
   // Stationary drip: fires on interval only when the finger is held still.
   // Suppressed automatically when onPanResponderMove is firing (lastMoveTimeRef
@@ -464,13 +485,14 @@ export const RosettaScreen = () => {
       // Skip if a move event fired within the last 32 ms (two interval ticks) —
       // onPanResponderMove is already generating splats with motion velocity.
       if (Date.now() - lastMoveTimeRef.current < 32) return
+      const baseVel = config.SPLAT_FORCE / 25
       const pressure = touchPressureRef.current || 1.0
       const elapsedTime = (Date.now() - pourStartTimeRef.current) / 1000
       splatStackRef.current.push({
         x: lastTouchRef.current.x,
         y: lastTouchRef.current.y,
         dx: 0,
-        dy: -BASE_VELOCITY * pressure,
+        dy: -baseVel * pressure,
         pressure,
         elapsedTime,
       })
@@ -484,7 +506,8 @@ export const RosettaScreen = () => {
     }
   }
 
-  const panResponder = PanResponder.create({
+  // Memoize PanResponder so it's created once, reading config inline
+  const panResponderRef = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onStartShouldSetPanResponderCapture: () => true,
     onMoveShouldSetPanResponder: () => true,
@@ -513,18 +536,15 @@ export const RosettaScreen = () => {
       const ddy = newY - prev.y
       const dist = Math.sqrt(ddx * ddx + ddy * ddy)
 
-      // Velocity: direction follows the drag; magnitude scales with movement
-      // speed (faster drag → more momentum), floored at BASE_VELOCITY so
-      // even a very slow drag still injects some flow.
-      // SPLAT_FORCE * 0.5 converts normalized-UV movement into velocity units
-      // on the same scale as BASE_VELOCITY.
-      const speed = Math.max(BASE_VELOCITY, dist * config.SPLAT_FORCE * 0.5)
+      // Read BASE_VELOCITY from config inline so it tracks SPLAT_FORCE changes
+      const baseVel = config.SPLAT_FORCE / 25
+      const speed = Math.max(baseVel, dist * config.SPLAT_FORCE * 0.5)
       const vx = dist > 0 ? (ddx / dist) * speed * p : 0
-      const vy = dist > 0 ? (ddy / dist) * speed * p : -BASE_VELOCITY * p
+      const vy = dist > 0 ? (ddy / dist) * speed * p : -baseVel * p
 
       // Interpolate along the movement path so there are no gaps in the stream.
-      const step = 0.005
-      const steps = Math.max(1, Math.min(25, Math.ceil(dist / step)))
+      const step = 0.008
+      const steps = Math.max(1, Math.min(15, Math.ceil(dist / step)))
       const elapsedTime = (Date.now() - pourStartTimeRef.current) / 1000
 
       for (let i = 1; i <= steps; i++) {
@@ -547,7 +567,18 @@ export const RosettaScreen = () => {
       touchPressureRef.current = 0
       stopContinuousPouring()
     },
-  })
+  }))
+
+  // Cleanup: stop interval and cancel RAF loop on unmount
+  useEffect(() => {
+    return () => {
+      stopContinuousPouring()
+      if (cancelSimRef.current) {
+        cancelSimRef.current()
+        cancelSimRef.current = null
+      }
+    }
+  }, [])
 
   return (
     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgb(25, 15, 8)' }}>
@@ -564,7 +595,7 @@ export const RosettaScreen = () => {
           splatStackRef.current = []
           onContextCreate(gl, splatStackRef, cancelSimRef)
         }}
-        {...panResponder.panHandlers}
+        {...panResponderRef.current.panHandlers}
       />
 
       {/* HUD overlay — box-none so the bar background passes touches to GLView */}
@@ -682,6 +713,20 @@ export const RosettaScreen = () => {
                 </View>
               )
             })}
+            <TouchableOpacity
+              onPress={resetSettings}
+              style={{
+                marginTop: 24,
+                marginHorizontal: 20,
+                marginBottom: 40,
+                paddingVertical: 14,
+                borderRadius: 10,
+                backgroundColor: 'rgba(255,255,255,0.08)',
+                alignItems: 'center',
+              }}
+            >
+              <RNText style={{ color: '#A0896B', fontSize: 15 }}>Reset to Defaults</RNText>
+            </TouchableOpacity>
           </ScrollView>
         </View>
       </Modal>
@@ -999,7 +1044,7 @@ function onContextCreate(
 
     splatProgram.bind()
     gl.uniform1i(splatProgram.uniforms.uTarget, velocity.read.attach(0))
-    gl.uniform1f(splatProgram.uniforms.aspectRatio, SCREEN_WIDTH / SCREEN_HEIGHT)
+    gl.uniform1f(splatProgram.uniforms.aspectRatio, gl.drawingBufferWidth / gl.drawingBufferHeight)
     gl.uniform2f(splatProgram.uniforms.point, x, y)
     gl.uniform1f(splatProgram.uniforms.uMaskMode, 0.0)
 
@@ -1039,7 +1084,7 @@ function onContextCreate(
   function applyInputs() {
     const qlen = splatStackRef.current?.length ?? 0
     // Adaptively process more when backlog builds, capped for perf
-    const maxSplatsPerFrame = Math.min(12, Math.max(2, Math.ceil(qlen / 4)))
+    const maxSplatsPerFrame = Math.min(8, Math.max(2, Math.ceil(qlen / 4)))
     let processed = 0
     while ((splatStackRef.current?.length ?? 0) > 0 && processed < maxSplatsPerFrame) {
       const s = splatStackRef.current.shift()
@@ -1072,6 +1117,7 @@ function onContextCreate(
     gl.uniform1f(displayProgram.uniforms.uSpecularPower, config.SPECULAR_POWER)
     gl.uniform1f(displayProgram.uniforms.uMaskHarden, config.MASK_HARDEN)
     gl.uniform1f(displayProgram.uniforms.uFoamAbsorption, config.FOAM_ABSORPTION)
+    gl.uniform1f(displayProgram.uniforms.uSpecularClamp, config.SPECULAR_CLAMP)
 
     blit(target)
   }
@@ -1165,7 +1211,7 @@ function onContextCreate(
   function calcDeltaTime() {
     const now = Date.now()
     let dt = (now - lastUpdateTime) / 1000
-    dt = Math.min(dt, 0.016666) // cap at ~60fps
+    dt = Math.min(dt, 0.033) // cap at ~30fps — allows real-time sim speed down to 30fps
     lastUpdateTime = now
     return dt
   }

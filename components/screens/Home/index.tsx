@@ -1,6 +1,6 @@
 import { router } from 'expo-router'
 import { View } from '~/components/primitives/View'
-import { Text } from '~/components/primitives/Text'
+import { MilkText } from '~/components/primitives/MilkText'
 import { Image } from '~/components/primitives/Image'
 import { Button, ButtonText } from '~/components/primitives/Button'
 
@@ -19,27 +19,27 @@ export function HomeScreen() {
         style={{ width: 100, height: 100 }}
         contentFit="contain"
       />
-      <Text
-        style={{
-          color: 'white',
-          fontSize: 28,
-          fontFamily: 'SF-Pro-Display-Bold',
-          marginTop: 24,
-        }}
+      <MilkText
+        fontSize={28}
+        fontFamily="SF-Pro-Display-Bold"
+        milkColor="#F5F0E8"
+        ghostColor="rgba(255,255,255,0.2)"
+        fillDuration={1800}
+        style={{ marginTop: 24 }}
       >
         Pour My Friends
-      </Text>
-      <Text
-        style={{
-          color: '#A0896B',
-          fontSize: 16,
-          fontFamily: 'SF-Pro-Display-Regular',
-          marginTop: 8,
-          marginBottom: 48,
-        }}
+      </MilkText>
+      <MilkText
+        fontSize={16}
+        fontFamily="SF-Pro-Display-Regular"
+        milkColor="#A0896B"
+        ghostColor="rgba(160,137,107,0.3)"
+        fillDuration={1600}
+        delay={200}
+        style={{ marginTop: 8, marginBottom: 48 }}
       >
         latte art, anywhere
-      </Text>
+      </MilkText>
       <Button onPress={() => router.push('/rosetta')} style={{ marginBottom: 16 }}>
         <ButtonText>Start Pouring</ButtonText>
       </Button>
