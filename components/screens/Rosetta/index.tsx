@@ -36,129 +36,87 @@ const SCREEN_HEIGHT = Dimensions.get('screen').height
 
 /** RGB color with components in the 0–1 range. */
 interface RGBColor {
-  /** Red channel. */
   r: number
-  /** Green channel. */
   g: number
-  /** Blue channel. */
   b: number
 }
 
 /** Pending splat input queued from touch events. */
 interface SplatInput {
-  /** UV x-coordinate (0 = left, 1 = right). */
+  /** UV x (0 = left, 1 = right). */
   x: number
-  /** UV y-coordinate (0 = bottom, 1 = top). */
+  /** UV y (0 = bottom, 1 = top). */
   y: number
-  /** Velocity x-component in sim units. */
   dx: number
-  /** Velocity y-component in sim units. */
   dy: number
-  /** Normalized touch pressure (0.1–1.0). */
   pressure: number
-  /** Seconds elapsed since the current pour began. */
   elapsedTime: number
+  moveDist: number
 }
 
 /** WebGL texture format pair for FBO creation. */
-interface TextureFormat {
-  /** GL internal format enum (e.g. RGBA16F). */
-  internalFormat: number
-  /** GL pixel format enum (e.g. RGBA). */
-  format: number
-}
+type TextureFormat = { internalFormat: number; format: number }
 
 /** WebGL extension capabilities detected at init. */
 interface GLExtensions {
-  /** RGBA half-float format, or null if unsupported. */
   formatRGBA: TextureFormat | null
-  /** RG half-float format, or null if unsupported. */
   formatRG: TextureFormat | null
-  /** R half-float format, or null if unsupported. */
   formatR: TextureFormat | null
-  /** Half-float texture type enum. */
   halfFloatTexType: number
-  /** Whether OES_texture_*_linear is available. */
   supportLinearFiltering: unknown
 }
 
 /** Single framebuffer object with an attached texture. */
 interface FBO {
-  /** The backing GL texture. */
   texture: WebGLTexture
-  /** The GL framebuffer. */
   fbo: WebGLFramebuffer
-  /** Texture width in pixels. */
   width: number
-  /** Texture height in pixels. */
   height: number
   /** 1 / width. */
   texelSizeX: number
   /** 1 / height. */
   texelSizeY: number
-  /** Bind this texture to the given texture unit and return the unit index. */
+  /** Bind this texture to the given unit and return the unit index. */
   attach: (id: number) => number
 }
 
 /** Double-buffered FBO for ping-pong rendering. */
 interface DoubleFBO {
-  /** Texture width in pixels. */
   width: number
-  /** Texture height in pixels. */
   height: number
-  /** 1 / width. */
   texelSizeX: number
-  /** 1 / height. */
   texelSizeY: number
-  /** Current read buffer. */
   read: FBO
-  /** Current write buffer. */
   write: FBO
-  /** Swap read and write buffers. */
   swap: () => void
 }
 
 /** Parameters for a single fluid splat injection. */
 interface SplatParams {
-  /** UV x-coordinate of the splat center. */
   x: number
-  /** UV y-coordinate of the splat center. */
   y: number
-  /** Velocity x-component. */
   dx: number
-  /** Velocity y-component. */
   dy: number
-  /** Dye color to deposit. */
   color: RGBColor
-  /** Splat radius as a percentage of screen size. Defaults to config.SPLAT_RADIUS. */
+  /** Splat radius as % of screen size. Defaults to config.SPLAT_RADIUS. */
   radiusPct?: number
-  /** Radial outward displacement force. */
   radialForce?: number
 }
 
 /** Parameters for creating a single FBO. */
 interface CreateFBOParams {
-  /** Width in pixels. */
   w: number
-  /** Height in pixels. */
   h: number
-  /** GL internal format. */
   internalFormat: number
-  /** GL pixel format. */
   format: number
-  /** GL texture data type. */
   type: number
-  /** GL filtering mode (LINEAR or NEAREST). */
   filtering: number
 }
 
 /** Compiled GL program wrapper. */
 interface GLProgram {
-  /** Map of uniform names to their GL locations. */
   uniforms: Record<string, WebGLUniformLocation | null>
-  /** The underlying WebGLProgram. */
   program: WebGLProgram
-  /** Activate this program for subsequent draw calls. */
   bind: () => void
 }
 
@@ -173,108 +131,56 @@ interface GLProgram {
 const config = {
   SIM_RESOLUTION: 256,
   DYE_RESOLUTION: 512,
-  CAPTURE_RESOLUTION: 1024,
 
   // Fluid tuning
   DENSITY_DISSIPATION: 0,
-  VELOCITY_DISSIPATION: 1,
+  VELOCITY_DISSIPATION: 0.5,
   PRESSURE: 1,
-  PRESSURE_ITERATIONS: 10,
+  PRESSURE_ITERATIONS: 1,
   CURL: 0,
 
   // Pour tuning
-  SPLAT_RADIUS: 1.2,
+  SPLAT_RADIUS: 1.0,
   SPLAT_FORCE: 200,
-  RADIAL_PUSH: 3.0,
+  RADIAL_PUSH: 4.0,
   FOAM_ABSORPTION: 1.0,
 
   // Latte-art display
-  TRANSPARENT: false,
-  MASK_HARDEN: 0.4,
+  MASK_HARDEN: 0.3,
   MILK_SPECULAR: 0.28,
   SPECULAR_POWER: 48.0,
   SPECULAR_CLAMP: 0.48,
   MILK_OPACITY: 1.0,
-  CREMA_STRENGTH: 0.08,
-  ESPRESSO_COLOR: { r: 0.14, g: 0.055, b: 0.014 } as RGBColor,
+  CREMA_STRENGTH: 0.05,
+  ESPRESSO_COLOR: { r: 0.22, g: 0.12, b: 0.05 } as RGBColor,
   MILK_COLOR: { r: 1.0, g: 0.98, b: 0.96 } as RGBColor,
   VALLEY_STRENGTH: 0.9,
   PAUSED: false,
 }
 
-/** User-adjustable simulation settings exposed in the HUD modal. */
-interface SimSettings {
-  /** Gaussian splat radius as % of screen. */
-  SPLAT_RADIUS: number
-  /** Velocity magnitude injected per splat. */
-  SPLAT_FORCE: number
-  /** Rate at which velocity decays each frame (higher = faster decay). */
-  VELOCITY_DISSIPATION: number
-  /** Vorticity confinement strength. */
-  CURL: number
-  /** Strength of espresso reveal in thin-milk valleys. */
-  VALLEY_STRENGTH: number
-  /** Sharpness of the milk-espresso boundary (0 = soft, 1 = crisp). */
-  MASK_HARDEN: number
-  /** Radial outward displacement intensity around the pour point. */
-  RADIAL_PUSH: number
-  /** Beer-Lambert absorption coefficient for foam opacity. */
-  FOAM_ABSORPTION: number
-  /** Granular crema noise intensity on espresso surface. */
-  CREMA_STRENGTH: number
-  /** Overall milk opacity (lower reveals more espresso through foam). */
-  MILK_OPACITY: number
-  /** Specular highlight intensity on milk foam. */
-  MILK_SPECULAR: number
-  /** Specular exponent controlling highlight tightness. */
-  SPECULAR_POWER: number
-}
-
-/** UI definition for a single settings row. */
-interface SettingDef {
-  /** Display label shown in the settings modal. */
-  label: string
-  /** Config key to read/write. */
-  key: keyof SimSettings
-  /** Minimum allowed value. */
-  min: number
-  /** Maximum allowed value. */
-  max: number
-  /** Increment/decrement step size. */
-  step: number
-}
-
-/** Settings modal definitions mapping labels to config keys. */
-const SETTING_DEFS: SettingDef[] = [
+/** Settings modal definitions — single source of truth for adjustable sim params. */
+const SETTING_DEFS = [
   { label: 'Pour Width', key: 'SPLAT_RADIUS', min: 0.5, max: 4.0, step: 0.1 },
   { label: 'Pour Force', key: 'SPLAT_FORCE', min: 50, max: 300, step: 10 },
   { label: 'Flow Decay', key: 'VELOCITY_DISSIPATION', min: 0, max: 2, step: 0.1 },
-  { label: 'Swirl', key: 'CURL', min: 0, max: 5, step: 0.5 },
+  { label: 'Swirl', key: 'CURL', min: 0, max: 10, step: 0.5 },
   { label: 'Edge Definition', key: 'VALLEY_STRENGTH', min: 0, max: 1, step: 0.05 },
   { label: 'Milk Boundary', key: 'MASK_HARDEN', min: 0, max: 1, step: 0.05 },
-  { label: 'Radial Push', key: 'RADIAL_PUSH', min: 0, max: 5, step: 0.25 },
+  { label: 'Radial Push', key: 'RADIAL_PUSH', min: 0, max: 8, step: 0.25 },
   { label: 'Foam Absorption', key: 'FOAM_ABSORPTION', min: 0, max: 2, step: 0.1 },
   { label: 'Crema Texture', key: 'CREMA_STRENGTH', min: 0, max: 0.3, step: 0.02 },
   { label: 'Milk Opacity', key: 'MILK_OPACITY', min: 0.5, max: 1.0, step: 0.05 },
   { label: 'Milk Shine', key: 'MILK_SPECULAR', min: 0, max: 0.6, step: 0.02 },
   { label: 'Shine Focus', key: 'SPECULAR_POWER', min: 8, max: 128, step: 4 },
-]
+] as const
+
+/** User-adjustable simulation settings derived from SETTING_DEFS. */
+type SimSettings = { [K in (typeof SETTING_DEFS)[number]['key']]: number }
 
 /** Snapshot of config values at module load, used for "Reset to Defaults". */
-const DEFAULT_SETTINGS: SimSettings = {
-  SPLAT_RADIUS: config.SPLAT_RADIUS,
-  SPLAT_FORCE: config.SPLAT_FORCE,
-  VELOCITY_DISSIPATION: config.VELOCITY_DISSIPATION,
-  CURL: config.CURL,
-  VALLEY_STRENGTH: config.VALLEY_STRENGTH,
-  MASK_HARDEN: config.MASK_HARDEN,
-  RADIAL_PUSH: config.RADIAL_PUSH,
-  FOAM_ABSORPTION: config.FOAM_ABSORPTION,
-  CREMA_STRENGTH: config.CREMA_STRENGTH,
-  MILK_OPACITY: config.MILK_OPACITY,
-  MILK_SPECULAR: config.MILK_SPECULAR,
-  SPECULAR_POWER: config.SPECULAR_POWER,
-}
+const DEFAULT_SETTINGS: SimSettings = Object.fromEntries(
+  SETTING_DEFS.map(({ key }) => [key, config[key as keyof typeof config] as number]),
+) as SimSettings
 
 // ---------------------------------------------------------------------------
 // GLSL Shaders
@@ -381,7 +287,9 @@ void main () {
   spec = min(spec, uSpecularClamp);
   vec3 warmSpec = spec * vec3(1.0, 0.97, 0.92);
   vec3 milkCol = uMilk * (0.8 + 0.2 * diff) + warmSpec;
-  vec3 c = mix(espresso, clamp(milkCol, 0.0, 1.0), maskAlpha);
+  vec3 cremaBlend = vec3(0.45, 0.28, 0.12);
+  vec3 base = mix(espresso, cremaBlend, smoothstep(0.0, 0.3, maskAlpha));
+  vec3 c = mix(base, clamp(milkCol, 0.0, 1.0), smoothstep(0.2, 0.85, maskAlpha));
   gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }
 `
@@ -416,7 +324,7 @@ void main () {
   float pPar = dot(p, pourDirAC);
   vec2 pPerpVec = p - pPar * pourDirAC;
   float pPerp2 = dot(pPerpVec, pPerpVec);
-  float s_aniso = exp(-(pPar * pPar / radius + pPerp2 / (radius * 0.25)));
+  float s_aniso = exp(-(pPar * pPar / (radius * 0.25) + pPerp2 / radius));
 
   float s = mix(s_iso, s_aniso, uRadialMode);
 
@@ -659,6 +567,7 @@ export const RosettaScreen = () => {
         dy: -baseVel * pressure,
         pressure,
         elapsedTime,
+        moveDist: 0,
       })
     }, 16)
   }
@@ -703,13 +612,14 @@ export const RosettaScreen = () => {
         const dist = Math.sqrt(ddx * ddx + ddy * ddy)
 
         const baseVel = config.SPLAT_FORCE / 25
-        const speed = Math.max(baseVel, dist * config.SPLAT_FORCE * 0.5)
+        const speedScale = Math.min(3.0, 1.0 + dist * 6.0)
+        const speed = baseVel * speedScale
         const vx = dist > 0 ? (ddx / dist) * speed * p : 0
         const vy = dist > 0 ? (ddy / dist) * speed * p : -baseVel * p
 
         // Interpolate along the drag path to avoid gaps in the stream
-        const step = 0.008
-        const steps = Math.max(1, Math.min(15, Math.ceil(dist / step)))
+        const step = 0.012
+        const steps = Math.max(1, Math.min(10, Math.ceil(dist / step)))
         const elapsedTime = (Date.now() - pourStartTimeRef.current) / 1000
 
         for (let i = 1; i <= steps; i++) {
@@ -721,6 +631,7 @@ export const RosettaScreen = () => {
             dy: vy,
             pressure: p,
             elapsedTime,
+            moveDist: dist,
           })
         }
 
@@ -745,6 +656,15 @@ export const RosettaScreen = () => {
       }
     }
   }, [])
+
+  const stepperBtnStyle = {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+  }
 
   return (
     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgb(25, 15, 8)' }}>
@@ -837,33 +757,13 @@ export const RosettaScreen = () => {
                   }}
                 >
                   <RNText style={{ flex: 1, color: '#D0C0A8', fontSize: 15 }}>{label}</RNText>
-                  <TouchableOpacity
-                    onPress={() => adjustSetting(key, -step, min, max)}
-                    style={{
-                      width: 36,
-                      height: 36,
-                      borderRadius: 8,
-                      backgroundColor: 'rgba(255,255,255,0.1)',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}
-                  >
+                  <TouchableOpacity onPress={() => adjustSetting(key, -step, min, max)} style={stepperBtnStyle}>
                     <RNText style={{ color: 'white', fontSize: 20, lineHeight: 24 }}>−</RNText>
                   </TouchableOpacity>
                   <RNText style={{ color: 'white', fontSize: 15, width: 56, textAlign: 'center' }}>
                     {settings[key].toFixed(decimals)}
                   </RNText>
-                  <TouchableOpacity
-                    onPress={() => adjustSetting(key, step, min, max)}
-                    style={{
-                      width: 36,
-                      height: 36,
-                      borderRadius: 8,
-                      backgroundColor: 'rgba(255,255,255,0.1)',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                    }}
-                  >
+                  <TouchableOpacity onPress={() => adjustSetting(key, step, min, max)} style={stepperBtnStyle}>
                     <RNText style={{ color: 'white', fontSize: 20, lineHeight: 24 }}>+</RNText>
                   </TouchableOpacity>
                 </View>
@@ -990,10 +890,6 @@ function onContextCreate(
   }
 
   const { ext } = getWebGLContext(gl)
-
-  if (!ext.supportLinearFiltering) {
-    config.DYE_RESOLUTION = 512
-  }
 
   // --- Shader compilation ---
 
@@ -1132,31 +1028,20 @@ function onContextCreate(
   }
 
   function createDoubleFBO(params: CreateFBOParams): DoubleFBO {
-    let fbo1 = createFBO(params)
-    let fbo2 = createFBO(params)
-    return {
+    const result: DoubleFBO = {
       width: params.w,
       height: params.h,
-      texelSizeX: fbo1.texelSizeX,
-      texelSizeY: fbo1.texelSizeY,
-      get read() {
-        return fbo1
-      },
-      set read(value) {
-        fbo1 = value
-      },
-      get write() {
-        return fbo2
-      },
-      set write(value) {
-        fbo2 = value
-      },
+      texelSizeX: 1.0 / params.w,
+      texelSizeY: 1.0 / params.h,
+      read: createFBO(params),
+      write: createFBO(params),
       swap() {
-        const temp = fbo1
-        fbo1 = fbo2
-        fbo2 = temp
+        const temp = result.read
+        result.read = result.write
+        result.write = temp
       },
     }
+    return result
   }
 
   // --- Framebuffers ---
@@ -1248,7 +1133,7 @@ function onContextCreate(
     // Pass 1: radial outward displacement (oval kernel)
     if (radialForce != null && radialForce > 0) {
       gl.uniform3f(splatProgram.uniforms.color, radialForce, 0.0, 0.0)
-      gl.uniform1f(splatProgram.uniforms.radius, radius * 8.0)
+      gl.uniform1f(splatProgram.uniforms.radius, radius * 4.0)
       gl.uniform1f(splatProgram.uniforms.uRadialMode, 1.0)
       blit(velocity.write)
       velocity.swap()
@@ -1276,9 +1161,11 @@ function onContextCreate(
     let processed = 0
     while ((splatStackRef.current?.length ?? 0) > 0 && processed < maxSplatsPerFrame) {
       const s = splatStackRef.current!.shift()!
-      const radiusPct = config.SPLAT_RADIUS + Math.min(2.8, s.elapsedTime * 2.2)
       const speed = Math.sqrt(s.dx * s.dx + s.dy * s.dy)
-      const radialForce = speed * config.RADIAL_PUSH
+      const timeGrowth = Math.min(1.0, s.elapsedTime * 0.4)
+      const speedShrink = 1.0 / (1.0 + s.moveDist * 25.0)
+      const radiusPct = (config.SPLAT_RADIUS + timeGrowth) * speedShrink
+      const radialForce = speed * config.RADIAL_PUSH * speedShrink
       splat({ x: s.x, y: s.y, dx: s.dx, dy: s.dy, color: config.MILK_COLOR, radiusPct, radialForce })
       processed++
     }
