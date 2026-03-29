@@ -612,7 +612,7 @@ export const RosettaScreen = () => {
         const dist = Math.sqrt(ddx * ddx + ddy * ddy)
 
         const baseVel = config.SPLAT_FORCE / 25
-        const speedScale = Math.min(3.0, 1.0 + dist * 6.0)
+        const speedScale = Math.min(1.8, 1.0 + dist * 3.0)
         const speed = baseVel * speedScale
         const vx = dist > 0 ? (ddx / dist) * speed * p : 0
         const vy = dist > 0 ? (ddy / dist) * speed * p : -baseVel * p

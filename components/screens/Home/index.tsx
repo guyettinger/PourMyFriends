@@ -38,7 +38,7 @@ export function HomeScreen() {
         delay={200}
         style={{ marginTop: 8, marginBottom: 48 }}
       >
-        latte art, anywhere
+        made with a latte love
       </MilkText>
       <Button onPress={() => router.push('/rosetta')} style={{ marginBottom: 16 }}>
         <ButtonText>Start Pouring</ButtonText>

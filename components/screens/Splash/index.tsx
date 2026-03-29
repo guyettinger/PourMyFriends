@@ -70,7 +70,7 @@ export function SplashIntroScreen() {
           delay={500}
           style={{ marginTop: 8 }}
         >
-          latte art, anywhere
+          made with a latte love
         </MilkText>
       </Animated.View>
     </TouchableOpacity>
