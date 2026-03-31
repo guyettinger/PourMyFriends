@@ -612,8 +612,8 @@ export const RosettaScreen = () => {
         const dist = Math.sqrt(ddx * ddx + ddy * ddy)
 
         const baseVel = config.SPLAT_FORCE / 25
-        const speedScale = Math.min(1.8, 1.0 + dist * 3.0)
-        const speed = baseVel * speedScale
+        const speedDamp = 1.0 / (1.0 + dist * 2.0)
+        const speed = baseVel * speedDamp
         const vx = dist > 0 ? (ddx / dist) * speed * p : 0
         const vy = dist > 0 ? (ddy / dist) * speed * p : -baseVel * p
 
@@ -1161,11 +1161,11 @@ function onContextCreate(
     let processed = 0
     while ((splatStackRef.current?.length ?? 0) > 0 && processed < maxSplatsPerFrame) {
       const s = splatStackRef.current!.shift()!
-      const speed = Math.sqrt(s.dx * s.dx + s.dy * s.dy)
-      const timeGrowth = Math.min(1.0, s.elapsedTime * 0.4)
-      const speedShrink = 1.0 / (1.0 + s.moveDist * 25.0)
-      const radiusPct = (config.SPLAT_RADIUS + timeGrowth) * speedShrink
-      const radialForce = speed * config.RADIAL_PUSH * speedShrink
+      const flowRate = 1.0 + Math.min(0.5, s.elapsedTime * 0.1)
+      const depositFactor = 1.0 / (1.0 + s.moveDist * 8.0)
+      const pressureScale = 0.7 + 0.3 * s.pressure
+      const radiusPct = config.SPLAT_RADIUS * flowRate * depositFactor * pressureScale
+      const radialForce = config.RADIAL_PUSH * flowRate * depositFactor * pressureScale * 0.5
       splat({ x: s.x, y: s.y, dx: s.dx, dy: s.dy, color: config.MILK_COLOR, radiusPct, radialForce })
       processed++
     }
