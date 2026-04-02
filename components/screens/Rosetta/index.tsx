@@ -140,8 +140,8 @@ const config = {
   CURL: 0,
 
   // Pour tuning
-  SPLAT_RADIUS: 1.0,
-  SPLAT_FORCE: 200,
+  SPLAT_RADIUS: 3.0,
+  SPLAT_FORCE: 150,
   RADIAL_PUSH: 4.0,
   FOAM_ABSORPTION: 1.0,
 
