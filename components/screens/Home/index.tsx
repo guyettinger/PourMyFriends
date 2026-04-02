@@ -10,7 +10,7 @@ export function HomeScreen() {
       style={{
         flex: 1,
         backgroundColor: 'rgb(14, 10, 7)',
-        justifyContent: 'center',
+        justifyContent: 'flex-start',
         alignItems: 'center',
       }}
     >
@@ -40,12 +40,21 @@ export function HomeScreen() {
       >
         made with a latte love
       </MilkText>
-      <Button onPress={() => router.push('/rosetta')} style={{ marginBottom: 16 }}>
+
+      <View
+        style={{
+          flex: 1,
+          justifyContent: 'space-around',
+          alignItems: 'center',
+        }}
+      >
+      <Button onPress={() => router.push('/rosetta')}>
         <ButtonText>Start Pouring</ButtonText>
       </Button>
       <Button onPress={() => router.push('/about')}>
         <ButtonText>About</ButtonText>
       </Button>
+      </View>
     </View>
   )
 }
