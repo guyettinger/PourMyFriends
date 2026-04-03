@@ -57,7 +57,7 @@ This project uses [file-based routing](https://docs.expo.dev/router/introduction
 
 ## Building
 
-This project uses [EAS Build](https://docs.expo.dev/build/introduction/) to create deployment builds for app stores. Each app store has a `build:*` script for creating mobile and tv versions of the application.
+This project uses [EAS Build](https://docs.expo.dev/build/introduction/) to create deployment builds for app stores. Each app store has a `build:*` script for creating the application.
 
 ## Learn more
 

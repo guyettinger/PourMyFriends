@@ -29,6 +29,7 @@ export default ({}: ConfigContext): ExpoConfig => ({
     'expo-router',
     'expo-font',
     'expo-localization',
+    'expo-image'
   ],
   android: {
     adaptiveIcon: {
@@ -37,7 +38,6 @@ export default ({}: ConfigContext): ExpoConfig => ({
       backgroundColor: '#ffffff',
     },
     package: 'com.pourmyfriends.app',
-    edgeToEdgeEnabled: true,
   },
   ios: {
     icon: {
@@ -58,7 +58,6 @@ export default ({}: ConfigContext): ExpoConfig => ({
   experiments: {
     typedRoutes: true,
   },
-  newArchEnabled: true,
   name: 'pourmyfriends',
   slug: 'pourmyfriends',
   extra: {
