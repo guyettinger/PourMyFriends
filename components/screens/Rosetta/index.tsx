@@ -101,6 +101,8 @@ interface SplatParams {
   /** Splat radius as % of screen size. Defaults to config.SPLAT_RADIUS. */
   radiusPct?: number
   radialForce?: number
+  /** Pitcher height 0..1; 0 = low (visible draw), 1 = high (invisible fill). */
+  heightFactor?: number
 }
 
 /** Parameters for creating a single FBO. */
@@ -136,7 +138,7 @@ const config = {
   DENSITY_DISSIPATION: 0,
   VELOCITY_DISSIPATION: 0.5,
   PRESSURE: 1,
-  PRESSURE_ITERATIONS: 1,
+  PRESSURE_ITERATIONS: 2,
   CURL: 0,
 
   // Pour tuning
@@ -144,6 +146,8 @@ const config = {
   SPLAT_FORCE: 150,
   RADIAL_PUSH: 4.0,
   FOAM_ABSORPTION: 1.0,
+  /** Pitcher height: 0 = low (visible "draw"), 1 = high (invisible "fill"). */
+  PITCHER_HEIGHT: 0,
 
   // Latte-art display
   MASK_HARDEN: 0.3,
@@ -151,15 +155,36 @@ const config = {
   SPECULAR_POWER: 48.0,
   SPECULAR_CLAMP: 0.48,
   MILK_OPACITY: 1.0,
-  CREMA_STRENGTH: 0.05,
-  ESPRESSO_COLOR: { r: 0.22, g: 0.12, b: 0.05 } as RGBColor,
-  MILK_COLOR: { r: 1.0, g: 0.98, b: 0.96 } as RGBColor,
+  CREMA_STRENGTH: 0.00,
   VALLEY_STRENGTH: 0.9,
   PAUSED: false,
+
+  // Colors (all as RGBColor — 0..1 per channel).
+  ESPRESSO_COLOR: { r: 0.22, g: 0.12, b: 0.05 } as RGBColor,
+  MILK_COLOR: { r: 1.0, g: 0.98, b: 0.96 } as RGBColor,
+  /** Crema layer tint — tan-brown froth modulated by crema density. */
+  CREMA_TINT_COLOR: { r: 0.25, g: 0.15, b: 0.10 } as RGBColor,
+  /** Warm rim tint at the milk↔crema boundary. */
+  MILK_RIM_COLOR: { r: 0.45, g: 0.28, b: 0.12 } as RGBColor,
+  /** Warm tint applied to specular highlights on the milk. */
+  SPECULAR_TINT_COLOR: { r: 1.0, g: 0.97, b: 0.92 } as RGBColor,
+  /** Backdrop showing behind/around the GLView. */
+  CUP_BACKGROUND_COLOR: { r: 25 / 255, g: 15 / 255, b: 8 / 255 } as RGBColor,
+  /** Settings modal backdrop. */
+  MODAL_BACKGROUND_COLOR: { r: 18 / 255, g: 12 / 255, b: 8 / 255 } as RGBColor,
+  /** Accent color for secondary HUD text (Done button, reset link). */
+  HUD_ACCENT_COLOR: { r: 0xa0 / 255, g: 0x89 / 255, b: 0x6b / 255 } as RGBColor,
+  /** Label color for settings rows. */
+  HUD_LABEL_COLOR: { r: 0xd0 / 255, g: 0xc0 / 255, b: 0xa8 / 255 } as RGBColor,
 }
+
+/** Convert an RGBColor (0..1 per channel) to a CSS rgb() string for React Native styles. */
+const rgbToCss = (c: RGBColor) =>
+  `rgb(${Math.round(c.r * 255)}, ${Math.round(c.g * 255)}, ${Math.round(c.b * 255)})`
 
 /** Settings modal definitions — single source of truth for adjustable sim params. */
 const SETTING_DEFS = [
+  { label: 'Pitcher Height', key: 'PITCHER_HEIGHT', min: 0, max: 1, step: 0.05 },
   { label: 'Pour Width', key: 'SPLAT_RADIUS', min: 0.5, max: 4.0, step: 0.1 },
   { label: 'Pour Force', key: 'SPLAT_FORCE', min: 50, max: 300, step: 10 },
   { label: 'Flow Decay', key: 'VELOCITY_DISSIPATION', min: 0, max: 2, step: 0.1 },
@@ -222,8 +247,18 @@ varying vec2 vB;
 uniform sampler2D uTexture;
 uniform vec3 uEspresso;
 uniform vec3 uMilk;
+uniform vec3 uCremaTint;
+uniform vec3 uMilkRim;
+uniform vec3 uSpecularTint;
 uniform float uMilkOpacity;
 uniform vec2 texelSize;
+// Native texel size of the dye texture (NOT the display target).
+// The baseVertex varyings vL/vR/vT/vB use texelSize = display target's size,
+// which is much finer than the dye grid; sampling at those offsets produces
+// sub-dye-texel differences that alias to the 512-grid as directional streaks.
+// We override with this uniform so Laplacian / tent / gradient see real
+// dye neighbors.
+uniform vec2 uDyeTexelSize;
 uniform float uValleyStrength;
 uniform float uCremaStrength;
 uniform float uMilkSpecular;
@@ -236,31 +271,47 @@ float hash21(vec2 p) {
   return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
 
+// Bilinear-interpolated value noise — smooth over space, no pixelated hash grid.
+float valueNoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  float a = hash21(i);
+  float b = hash21(i + vec2(1.0, 0.0));
+  float c = hash21(i + vec2(0.0, 1.0));
+  float d = hash21(i + vec2(1.0, 1.0));
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
 void main () {
-  // Sample 4-neighbor mask values
+  // All neighbor sampling uses dye's native texel size so we resolve actual
+  // dye-cell differences instead of the derivative of bilinear interpolation.
+  vec2 d = uDyeTexelSize;
+  vec2 uvL = vUv - vec2(d.x, 0.0);
+  vec2 uvR = vUv + vec2(d.x, 0.0);
+  vec2 uvT = vUv + vec2(0.0, d.y);
+  vec2 uvB = vUv - vec2(0.0, d.y);
+
   float m  = texture2D(uTexture, vUv).r;
-  float ml = texture2D(uTexture, vL).r;
-  float mr = texture2D(uTexture, vR).r;
-  float mt = texture2D(uTexture, vT).r;
-  float mb = texture2D(uTexture, vB).r;
+  float ml = texture2D(uTexture, uvL).r;
+  float mr = texture2D(uTexture, uvR).r;
+  float mt = texture2D(uTexture, uvT).r;
+  float mb = texture2D(uTexture, uvB).r;
 
   // Diagonal samples for 3x3 tent kernel
-  vec2 d = texelSize;
   float mtl = texture2D(uTexture, vUv + vec2(-d.x,  d.y)).r;
   float mtr = texture2D(uTexture, vUv + vec2( d.x,  d.y)).r;
   float mbl = texture2D(uTexture, vUv + vec2(-d.x, -d.y)).r;
   float mbr = texture2D(uTexture, vUv + vec2( d.x, -d.y)).r;
 
-  // 3x3 tent blur to reduce pixelation
+  // 3x3 tent blur (proper — now spans real dye texels)
   float edges = ml + mr + mt + mb;
   float corners = mtl + mtr + mbl + mbr;
   float mBlur = (4.0*m + 2.0*edges + corners) / 16.0;
 
-  // Valley detection: Laplacian of raw mask (positive at local minima = thin milk)
+  // Valley detection: Laplacian at dye-texel scale (stable, not display-res).
   float laplacian = ml + mr + mt + mb - 4.0 * m;
-  float valleyScale = 10.0 / (length(texelSize) * 512.0);
-  float valley = clamp(laplacian * uValleyStrength * valleyScale, 0.0, 1.0);
-  float mask = mBlur;
+  float valley = clamp(laplacian * uValleyStrength * 3.0, 0.0, 1.0);
 
   // Beer-Lambert opacity: thin foam is translucent, thick foam is opaque
   float physAlpha = 1.0 - exp(-uFoamAbsorption * mBlur);
@@ -271,32 +322,45 @@ void main () {
   float mEdge = smoothstep(lo, hi, physAlpha);
   float maskAlpha = clamp((mEdge - valley * 0.5) * uMilkOpacity, 0.0, 1.0);
 
-  // Directional lighting from blurred mask gradient
+  // Directional lighting from dye-texel-scale gradient (no bilinear aliasing).
   float dx = mr - ml;
   float dy = mt - mb;
   vec3 n = normalize(vec3(dx, dy, 0.15));
   vec3 lightDir = normalize(vec3(0.2, 0.3, 1.0));
   float diff = clamp(dot(n, lightDir), 0.0, 1.0);
 
-  // Crema noise on espresso surface
-  float crema = 1.0 - uCremaStrength * hash21(floor(vUv * 256.0));
-  vec3 espresso = uEspresso * crema;
+  // Smooth grain — value noise at a frequency chosen so the cell is many
+  // display pixels across (no per-pixel stipple).
+  float grain = 1.0 - uCremaStrength * valueNoise(vUv * 120.0);
+  vec3 espresso = uEspresso * grain;
+
+  // Crema layer — tan-brown froth that sits on the espresso.
+  // Density (dye.g) starts at 1.0 everywhere; pours erode it.
+  float cremaDensity = texture2D(uTexture, vUv).g;
+  vec3 cremaTint = uCremaTint * grain;
+  vec3 cupSurface = mix(espresso, cremaTint, cremaDensity);
 
   // Specular highlight gated by maskAlpha with warm tint
   float spec = pow(max(n.z, 0.0), uSpecularPower) * uMilkSpecular * maskAlpha;
   spec = min(spec, uSpecularClamp);
-  vec3 warmSpec = spec * vec3(1.0, 0.97, 0.92);
+  vec3 warmSpec = spec * uSpecularTint;
   vec3 milkCol = uMilk * (0.8 + 0.2 * diff) + warmSpec;
-  vec3 cremaBlend = vec3(0.45, 0.28, 0.12);
-  vec3 base = mix(espresso, cremaBlend, smoothstep(0.0, 0.3, maskAlpha));
+  vec3 base = mix(cupSurface, uMilkRim, smoothstep(0.0, 0.3, maskAlpha));
   vec3 c = mix(base, clamp(milkCol, 0.0, 1.0), smoothstep(0.2, 0.85, maskAlpha));
   gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
 }
 `
 
 /**
- * Splat fragment shader: injects velocity (additive) or milk mask (saturating).
- * Supports isotropic Gaussian (directional/dye) and anisotropic oval (radial push).
+ * Splat fragment shader: injects velocity (additive), or milk mask + crema channels (mask mode).
+ *
+ * Mask mode channel layout (dye texture):
+ *   r = milk visibility (saturating up — latte art white)
+ *   g = crema density  (subtracting down — starts at 1.0, pours erode it)
+ *
+ * uHeightFactor (0..1) models pitcher height:
+ *   0 = low pitcher → milk rides on top of crema (visible art / "draw" phase)
+ *   1 = high pitcher → milk dives under crema (invisible fill / "fill" phase)
  */
 const splatShader = `
 precision highp float;
@@ -309,6 +373,7 @@ uniform vec2 point;
 uniform float radius;
 uniform float uMaskMode;
 uniform float uRadialMode;
+uniform float uHeightFactor;
 uniform vec2 uPourDir;
 
 void main () {
@@ -328,18 +393,26 @@ void main () {
 
   float s = mix(s_iso, s_aniso, uRadialMode);
 
-  // Radial outward unit vector (aspect-corrected -> UV space)
-  vec2 outward = p / (sqrt(dist2) + 0.0001);
-  vec2 radialVel = vec2(outward.x / aspectRatio, outward.y) * color.r;
+  vec4 base = texture2D(uTarget, vUv);
 
-  vec2 vel = mix(color.xy, radialVel, uRadialMode);
-
-  vec3 splatContent = mix(vec3(vel, 0.0), color, uMaskMode);
-  vec3 splat = splatContent * s;
-
-  vec3 base = texture2D(uTarget, vUv).xyz;
-  vec3 result = mix(base + splat, max(base, splat), step(0.5, uMaskMode));
-  gl_FragColor = vec4(result, 1.0);
+  if (uMaskMode > 0.5) {
+    // Dye deposit: milk visibility in r, crema erosion in g
+    float drawVis = 1.0 - uHeightFactor;
+    float milkStrength = s * color.r * drawVis;
+    float newR = max(base.r, milkStrength);
+    // Crema is disrupted more at low pitcher (splashing through it)
+    // and less at high pitcher (gentle displacement from below)
+    float cremaDisrupt = s * mix(0.12, 0.85, drawVis);
+    float newG = max(0.0, base.g - cremaDisrupt);
+    gl_FragColor = vec4(newR, newG, base.b, 1.0);
+  } else {
+    // Velocity injection (directional or radial)
+    vec2 outward = p / (sqrt(dist2) + 0.0001);
+    vec2 radialVel = vec2(outward.x / aspectRatio, outward.y) * color.r;
+    vec2 vel = mix(color.xy, radialVel, uRadialMode);
+    vec3 splat = vec3(vel, 0.0) * s;
+    gl_FragColor = vec4(base.xyz + splat, 1.0);
+  }
 }
 `
 
@@ -474,6 +547,45 @@ void main () {
 }
 `
 
+/**
+ * MacCormack correction pass.
+ *
+ * Given phi_0 (original field), phi_hat (forward-advected), phi_bar (round-trip-advected),
+ * computes phi_corrected = phi_hat + 0.5 * (phi_0 - phi_bar), then clamps to the
+ * 4-neighbor bbox at the backtrace position to prevent overshoot (Clark-Ritchie limiter).
+ *
+ * Net effect: second-order accurate advection, dramatically reduced numerical diffusion
+ * so milk-mask edges stay crisp frame after frame.
+ */
+const macCormackShader = `
+precision highp float;
+precision highp sampler2D;
+varying vec2 vUv;
+uniform sampler2D uField;
+uniform sampler2D uHat;
+uniform sampler2D uBar;
+uniform sampler2D uVelocity;
+uniform vec2 texelSize;
+uniform float dt;
+uniform float dissipation;
+void main () {
+  vec4 hat = texture2D(uHat, vUv);
+  vec4 bar = texture2D(uBar, vUv);
+  vec4 phi0 = texture2D(uField, vUv);
+  vec4 corrected = hat + 0.5 * (phi0 - bar);
+  vec2 coord = vUv - dt * texture2D(uVelocity, vUv).xy * texelSize;
+  vec4 s00 = texture2D(uField, coord + vec2(-texelSize.x, -texelSize.y));
+  vec4 s10 = texture2D(uField, coord + vec2( texelSize.x, -texelSize.y));
+  vec4 s01 = texture2D(uField, coord + vec2(-texelSize.x,  texelSize.y));
+  vec4 s11 = texture2D(uField, coord + vec2( texelSize.x,  texelSize.y));
+  vec4 minV = min(min(s00, s10), min(s01, s11));
+  vec4 maxV = max(max(s00, s10), max(s01, s11));
+  corrected = clamp(corrected, minV, maxV);
+  float decay = 1.0 + dissipation * dt;
+  gl_FragColor = corrected / decay;
+}
+`
+
 /** Semi-Lagrangian advection shader with optional manual bilinear filtering fallback. */
 const advectionShader = `
 precision highp float;
@@ -594,6 +706,7 @@ export const RosettaScreen = () => {
         lastTouchRef.current = { x, y }
         const pressure = (evt.nativeEvent as unknown as { force?: number }).force || 1.0
         touchPressureRef.current = Math.max(0.1, Math.min(1.0, pressure))
+        pourStartTimeRef.current = Date.now()
         startContinuousPouring()
       },
       onPanResponderMove: (evt) => {
@@ -611,15 +724,15 @@ export const RosettaScreen = () => {
         const ddy = newY - prev.y
         const dist = Math.sqrt(ddx * ddx + ddy * ddy)
 
+        // Constant pour velocity — faithful to pitcher tilt (not drag speed).
+        // Lateral motion spreads the same flow over more area via sub-splat interpolation below.
         const baseVel = config.SPLAT_FORCE / 25
-        const speedDamp = 1.0 / (1.0 + dist * 2.0)
-        const speed = baseVel * speedDamp
-        const vx = dist > 0 ? (ddx / dist) * speed * p : 0
-        const vy = dist > 0 ? (ddy / dist) * speed * p : -baseVel * p
+        const vx = dist > 0 ? (ddx / dist) * baseVel * p : 0
+        const vy = dist > 0 ? (ddy / dist) * baseVel * p : -baseVel * p
 
-        // Interpolate along the drag path to avoid gaps in the stream
+        // Interpolate along the drag path. Uncap step count — fast swipes must still fill the stream.
         const step = 0.012
-        const steps = Math.max(1, Math.min(10, Math.ceil(dist / step)))
+        const steps = Math.max(1, Math.ceil(dist / step))
         const elapsedTime = (Date.now() - pourStartTimeRef.current) / 1000
 
         for (let i = 1; i <= steps; i++) {
@@ -633,6 +746,11 @@ export const RosettaScreen = () => {
             elapsedTime,
             moveDist: dist,
           })
+        }
+
+        // Cap the queue so a stalled frame can't cause a lag spike when it resumes.
+        if (splatStackRef.current.length > 32) {
+          splatStackRef.current.splice(0, splatStackRef.current.length - 32)
         }
 
         lastTouchRef.current.x = newX
@@ -667,7 +785,14 @@ export const RosettaScreen = () => {
   }
 
   return (
-    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: 'rgb(25, 15, 8)' }}>
+    <View
+      style={{
+        flex: 1,
+        justifyContent: 'center',
+        alignItems: 'center',
+        backgroundColor: rgbToCss(config.CUP_BACKGROUND_COLOR),
+      }}
+    >
       <GLView
         key={simKey}
         style={{ width: SCREEN_WIDTH, height: SCREEN_HEIGHT }}
@@ -722,7 +847,7 @@ export const RosettaScreen = () => {
         presentationStyle={Platform.OS === 'ios' ? 'pageSheet' : 'fullScreen'}
         onRequestClose={() => setSettingsVisible(false)}
       >
-        <View style={{ flex: 1, backgroundColor: 'rgb(18, 12, 8)' }}>
+        <View style={{ flex: 1, backgroundColor: rgbToCss(config.MODAL_BACKGROUND_COLOR) }}>
           <View
             style={{
               flexDirection: 'row',
@@ -738,7 +863,7 @@ export const RosettaScreen = () => {
               Simulation Settings
             </RNText>
             <TouchableOpacity onPress={() => setSettingsVisible(false)} style={{ padding: 4 }}>
-              <RNText style={{ color: '#A0896B', fontSize: 16 }}>Done</RNText>
+              <RNText style={{ color: rgbToCss(config.HUD_ACCENT_COLOR), fontSize: 16 }}>Done</RNText>
             </TouchableOpacity>
           </View>
           <ScrollView style={{ flex: 1 }}>
@@ -756,7 +881,7 @@ export const RosettaScreen = () => {
                     borderBottomColor: 'rgba(255,255,255,0.06)',
                   }}
                 >
-                  <RNText style={{ flex: 1, color: '#D0C0A8', fontSize: 15 }}>{label}</RNText>
+                  <RNText style={{ flex: 1, color: rgbToCss(config.HUD_LABEL_COLOR), fontSize: 15 }}>{label}</RNText>
                   <TouchableOpacity onPress={() => adjustSetting(key, -step, min, max)} style={stepperBtnStyle}>
                     <RNText style={{ color: 'white', fontSize: 20, lineHeight: 24 }}>−</RNText>
                   </TouchableOpacity>
@@ -781,7 +906,7 @@ export const RosettaScreen = () => {
                 alignItems: 'center',
               }}
             >
-              <RNText style={{ color: '#A0896B', fontSize: 15 }}>Reset to Defaults</RNText>
+              <RNText style={{ color: rgbToCss(config.HUD_ACCENT_COLOR), fontSize: 15 }}>Reset to Defaults</RNText>
             </TouchableOpacity>
           </ScrollView>
         </View>
@@ -924,16 +1049,23 @@ function onContextCreate(
     return uniforms
   }
 
+  // Tracks the currently-bound GLProgram. Maintained by bind() so blit() can
+  // push texelSize into the active program without round-tripping through
+  // gl.getParameter / gl.getUniformLocation (both are sync-points on mobile GLES).
+  let currentGLProgram: GLProgram | null = null
+
   function makeProgram(vertexShader: WebGLShader, fragmentShader: WebGLShader): GLProgram {
     const program = createProgram(vertexShader, fragmentShader)
     const uniforms = getUniforms(program)
-    return {
+    const result: GLProgram = {
       uniforms,
       program,
       bind() {
         gl.useProgram(program)
+        currentGLProgram = result
       },
     }
+    return result
   }
 
   // Compile all shaders
@@ -951,6 +1083,7 @@ function onContextCreate(
     advectionShader,
     ext.supportLinearFiltering ? null : ['MANUAL_FILTERING'],
   )
+  const macCormackFrag = compileShader(gl.FRAGMENT_SHADER, macCormackShader, ['macCormackFrag'])
 
   const splatProgram = makeProgram(baseVertex, splatFrag)
   const displayProgram = makeProgram(baseVertex, displayFrag)
@@ -961,6 +1094,7 @@ function onContextCreate(
   const pressureProgram = makeProgram(baseVertex, pressureFrag)
   const gradientSubtractProgram = makeProgram(baseVertex, gradientFrag)
   const advectionProgram = makeProgram(baseVertex, advectionFrag)
+  const macCormackProgram = makeProgram(baseVertex, macCormackFrag)
 
   // --- Fullscreen blit ---
 
@@ -981,11 +1115,8 @@ function onContextCreate(
       }
       const texelX = target ? 1.0 / target.width : 1.0 / gl.drawingBufferWidth
       const texelY = target ? 1.0 / target.height : 1.0 / gl.drawingBufferHeight
-      const currentProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null
-      if (currentProgram) {
-        const loc = gl.getUniformLocation(currentProgram, 'texelSize')
-        if (loc) gl.uniform2f(loc, texelX, texelY)
-      }
+      const loc = currentGLProgram?.uniforms.texelSize
+      if (loc) gl.uniform2f(loc, texelX, texelY)
 
       if (clear) {
         gl.clearColor(0.0, 0.0, 0.0, 1.0)
@@ -1051,6 +1182,19 @@ function onContextCreate(
   let curl: FBO
   let divergence: FBO
   let pressure: DoubleFBO
+  // MacCormack scratch buffers — phi_hat (forward-advected) and phi_bar (round-trip).
+  let velHat: FBO
+  let velBar: FBO
+  let dyeHat: FBO
+  let dyeBar: FBO
+
+  /** Clear a FBO to a solid RGBA color. Used to prime the dye field with full crema. */
+  function clearFBO(target: FBO, r: number, g: number, b: number, a: number) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo)
+    gl.viewport(0, 0, target.width, target.height)
+    gl.clearColor(r, g, b, a)
+    gl.clear(gl.COLOR_BUFFER_BIT)
+  }
 
   function initFramebuffers() {
     const simRes = getResolution(config.SIM_RESOLUTION)
@@ -1107,6 +1251,47 @@ function onContextCreate(
         type: texType,
         filtering: gl.NEAREST,
       })
+    if (velHat == null)
+      velHat = createFBO({
+        w: simRes.width,
+        h: simRes.height,
+        internalFormat: rg.internalFormat,
+        format: rg.format,
+        type: texType,
+        filtering,
+      })
+    if (velBar == null)
+      velBar = createFBO({
+        w: simRes.width,
+        h: simRes.height,
+        internalFormat: rg.internalFormat,
+        format: rg.format,
+        type: texType,
+        filtering,
+      })
+    if (dyeHat == null)
+      dyeHat = createFBO({
+        w: dyeRes.width,
+        h: dyeRes.height,
+        internalFormat: rgba.internalFormat,
+        format: rgba.format,
+        type: texType,
+        filtering,
+      })
+    if (dyeBar == null)
+      dyeBar = createFBO({
+        w: dyeRes.width,
+        h: dyeRes.height,
+        internalFormat: rgba.internalFormat,
+        format: rgba.format,
+        type: texType,
+        filtering,
+      })
+
+    // Prime the cup with a full crema layer (g = 1.0). Both read/write buffers seeded
+    // so the first swap doesn't overwrite with a stale zeroed buffer.
+    clearFBO(dye.read, 0.0, 1.0, 0.0, 1.0)
+    clearFBO(dye.write, 0.0, 1.0, 0.0, 1.0)
   }
 
   // --- Simulation ---
@@ -1116,37 +1301,42 @@ function onContextCreate(
    * Three GPU passes: radial push (optional), directional velocity, milk mask deposit.
    */
   function splat(params: SplatParams) {
-    const { x, y, dx, dy, color, radiusPct, radialForce } = params
+    const { x, y, dx, dy, color, radiusPct, radialForce, heightFactor } = params
     const radius = (radiusPct !== undefined ? radiusPct : config.SPLAT_RADIUS) / 10000.0
+    const h = heightFactor ?? 0
 
     splatProgram.bind()
     gl.uniform1i(splatProgram.uniforms.uTarget, velocity.read.attach(0))
     gl.uniform1f(splatProgram.uniforms.aspectRatio, gl.drawingBufferWidth / gl.drawingBufferHeight)
     gl.uniform2f(splatProgram.uniforms.point, x, y)
     gl.uniform1f(splatProgram.uniforms.uMaskMode, 0.0)
+    gl.uniform1f(splatProgram.uniforms.uHeightFactor, h)
 
     const len = Math.sqrt(dx * dx + dy * dy)
     const pourDirX = len > 0.0001 ? dx / len : 0.0
     const pourDirY = len > 0.0001 ? dy / len : -1.0
     gl.uniform2f(splatProgram.uniforms.uPourDir, pourDirX, pourDirY)
 
-    // Pass 1: radial outward displacement (oval kernel)
+    // Pass 1: radial outward displacement (oval kernel).
+    // High pitcher deposits less momentum — gentler stream.
     if (radialForce != null && radialForce > 0) {
-      gl.uniform3f(splatProgram.uniforms.color, radialForce, 0.0, 0.0)
+      const scaledRadial = radialForce * (1.0 - 0.6 * h)
+      gl.uniform3f(splatProgram.uniforms.color, scaledRadial, 0.0, 0.0)
       gl.uniform1f(splatProgram.uniforms.radius, radius * 4.0)
       gl.uniform1f(splatProgram.uniforms.uRadialMode, 1.0)
       blit(velocity.write)
       velocity.swap()
     }
 
-    // Pass 2: directional stream momentum
-    gl.uniform3f(splatProgram.uniforms.color, dx, dy, 0.0)
+    // Pass 2: directional stream momentum (also attenuated at high pitcher).
+    const velScale = 1.0 - 0.6 * h
+    gl.uniform3f(splatProgram.uniforms.color, dx * velScale, dy * velScale, 0.0)
     gl.uniform1f(splatProgram.uniforms.radius, radius)
     gl.uniform1f(splatProgram.uniforms.uRadialMode, 0.0)
     blit(velocity.write)
     velocity.swap()
 
-    // Pass 3: milk mask deposit (saturating blend)
+    // Pass 3: dye deposit (milk mask in r, crema erosion in g — handled by shader).
     gl.uniform1i(splatProgram.uniforms.uTarget, dye.read.attach(0))
     gl.uniform3f(splatProgram.uniforms.color, color.r, color.g, color.b)
     gl.uniform1f(splatProgram.uniforms.uMaskMode, 1.0)
@@ -1158,15 +1348,24 @@ function onContextCreate(
   function applyInputs() {
     const qlen = splatStackRef.current?.length ?? 0
     const maxSplatsPerFrame = Math.min(8, Math.max(2, Math.ceil(qlen / 4)))
+    const heightFactor = config.PITCHER_HEIGHT
     let processed = 0
     while ((splatStackRef.current?.length ?? 0) > 0 && processed < maxSplatsPerFrame) {
       const s = splatStackRef.current!.shift()!
       const flowRate = 1.0 + Math.min(0.5, s.elapsedTime * 0.1)
-      const depositFactor = 1.0 / (1.0 + s.moveDist * 30.0)
       const pressureScale = 0.7 + 0.3 * s.pressure
-      const radiusPct = config.SPLAT_RADIUS * flowRate * depositFactor * pressureScale
-      const radialForce = config.RADIAL_PUSH * flowRate * depositFactor * pressureScale * 0.5
-      splat({ x: s.x, y: s.y, dx: s.dx, dy: s.dy, color: config.MILK_COLOR, radiusPct, radialForce })
+      const radiusPct = config.SPLAT_RADIUS * flowRate * pressureScale
+      const radialForce = config.RADIAL_PUSH * flowRate * pressureScale * 0.5
+      splat({
+        x: s.x,
+        y: s.y,
+        dx: s.dx,
+        dy: s.dy,
+        color: config.MILK_COLOR,
+        radiusPct,
+        radialForce,
+        heightFactor,
+      })
       processed++
     }
   }
@@ -1182,6 +1381,24 @@ function onContextCreate(
       config.ESPRESSO_COLOR.b,
     )
     gl.uniform3f(displayProgram.uniforms.uMilk, config.MILK_COLOR.r, config.MILK_COLOR.g, config.MILK_COLOR.b)
+    gl.uniform3f(
+      displayProgram.uniforms.uCremaTint,
+      config.CREMA_TINT_COLOR.r,
+      config.CREMA_TINT_COLOR.g,
+      config.CREMA_TINT_COLOR.b,
+    )
+    gl.uniform3f(
+      displayProgram.uniforms.uMilkRim,
+      config.MILK_RIM_COLOR.r,
+      config.MILK_RIM_COLOR.g,
+      config.MILK_RIM_COLOR.b,
+    )
+    gl.uniform3f(
+      displayProgram.uniforms.uSpecularTint,
+      config.SPECULAR_TINT_COLOR.r,
+      config.SPECULAR_TINT_COLOR.g,
+      config.SPECULAR_TINT_COLOR.b,
+    )
     gl.uniform1f(displayProgram.uniforms.uMilkOpacity, config.MILK_OPACITY)
     gl.uniform1f(displayProgram.uniforms.uValleyStrength, config.VALLEY_STRENGTH)
     gl.uniform1f(displayProgram.uniforms.uCremaStrength, config.CREMA_STRENGTH)
@@ -1190,6 +1407,7 @@ function onContextCreate(
     gl.uniform1f(displayProgram.uniforms.uMaskHarden, config.MASK_HARDEN)
     gl.uniform1f(displayProgram.uniforms.uFoamAbsorption, config.FOAM_ABSORPTION)
     gl.uniform1f(displayProgram.uniforms.uSpecularClamp, config.SPECULAR_CLAMP)
+    gl.uniform2f(displayProgram.uniforms.uDyeTexelSize, dye.texelSizeX, dye.texelSizeY)
     blit(target)
   }
 
@@ -1240,26 +1458,60 @@ function onContextCreate(
     blit(velocity.write)
     velocity.swap()
 
-    // Advect velocity
+    // Advect velocity — MacCormack (forward, backward, correct+clamp).
     advectionProgram.bind()
-    gl.uniform2f(advectionProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
     if (!ext.supportLinearFiltering)
       gl.uniform2f(advectionProgram.uniforms.dyeTexelSize, velocity.texelSizeX, velocity.texelSizeY)
-    const velocityId = velocity.read.attach(0)
-    gl.uniform1i(advectionProgram.uniforms.uVelocity, velocityId)
-    gl.uniform1i(advectionProgram.uniforms.uSource, velocityId)
+    // Forward: phi_hat = advect(phi, v, +dt)
+    let velId = velocity.read.attach(0)
+    gl.uniform1i(advectionProgram.uniforms.uVelocity, velId)
+    gl.uniform1i(advectionProgram.uniforms.uSource, velId)
     gl.uniform1f(advectionProgram.uniforms.dt, dt)
-    gl.uniform1f(advectionProgram.uniforms.dissipation, config.VELOCITY_DISSIPATION)
+    gl.uniform1f(advectionProgram.uniforms.dissipation, 0.0)
+    blit(velHat)
+    // Backward: phi_bar = advect(phi_hat, v, -dt)
+    velId = velocity.read.attach(0)
+    gl.uniform1i(advectionProgram.uniforms.uVelocity, velId)
+    gl.uniform1i(advectionProgram.uniforms.uSource, velHat.attach(1))
+    gl.uniform1f(advectionProgram.uniforms.dt, -dt)
+    gl.uniform1f(advectionProgram.uniforms.dissipation, 0.0)
+    blit(velBar)
+    // Combine: velocity.write = clamp(phi_hat + 0.5*(phi - phi_bar))
+    macCormackProgram.bind()
+    velId = velocity.read.attach(0)
+    gl.uniform1i(macCormackProgram.uniforms.uField, velId)
+    gl.uniform1i(macCormackProgram.uniforms.uVelocity, velId)
+    gl.uniform1i(macCormackProgram.uniforms.uHat, velHat.attach(1))
+    gl.uniform1i(macCormackProgram.uniforms.uBar, velBar.attach(2))
+    gl.uniform1f(macCormackProgram.uniforms.dt, dt)
+    gl.uniform1f(macCormackProgram.uniforms.dissipation, config.VELOCITY_DISSIPATION)
     blit(velocity.write)
     velocity.swap()
 
-    // Advect dye (milk mask)
+    // Advect dye (milk + crema channels) — MacCormack.
+    advectionProgram.bind()
     if (!ext.supportLinearFiltering)
       gl.uniform2f(advectionProgram.uniforms.dyeTexelSize, dye.texelSizeX, dye.texelSizeY)
+    // Forward
     gl.uniform1i(advectionProgram.uniforms.uVelocity, velocity.read.attach(0))
     gl.uniform1i(advectionProgram.uniforms.uSource, dye.read.attach(1))
     gl.uniform1f(advectionProgram.uniforms.dt, dt)
-    gl.uniform1f(advectionProgram.uniforms.dissipation, config.DENSITY_DISSIPATION)
+    gl.uniform1f(advectionProgram.uniforms.dissipation, 0.0)
+    blit(dyeHat)
+    // Backward
+    gl.uniform1i(advectionProgram.uniforms.uVelocity, velocity.read.attach(0))
+    gl.uniform1i(advectionProgram.uniforms.uSource, dyeHat.attach(1))
+    gl.uniform1f(advectionProgram.uniforms.dt, -dt)
+    gl.uniform1f(advectionProgram.uniforms.dissipation, 0.0)
+    blit(dyeBar)
+    // Combine
+    macCormackProgram.bind()
+    gl.uniform1i(macCormackProgram.uniforms.uField, dye.read.attach(0))
+    gl.uniform1i(macCormackProgram.uniforms.uVelocity, velocity.read.attach(1))
+    gl.uniform1i(macCormackProgram.uniforms.uHat, dyeHat.attach(2))
+    gl.uniform1i(macCormackProgram.uniforms.uBar, dyeBar.attach(3))
+    gl.uniform1f(macCormackProgram.uniforms.dt, dt)
+    gl.uniform1f(macCormackProgram.uniforms.dissipation, config.DENSITY_DISSIPATION)
     blit(dye.write)
     dye.swap()
   }
