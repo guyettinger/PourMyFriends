@@ -1325,6 +1325,11 @@ function onContextCreate(
       gl.uniform1f(splatProgram.uniforms.uRadialMode, 1.0)
       blit(velocity.write)
       velocity.swap()
+      // Re-bind uTarget to the swapped-in velocity.read so Pass 2 doesn't
+      // sample the texture it's about to write to. WebGL2 strict mode (desktop
+      // Chrome) rejects that with "Feedback loop formed between Framebuffer
+      // and active Texture"; Android's GLES silently permitted it.
+      gl.uniform1i(splatProgram.uniforms.uTarget, velocity.read.attach(0))
     }
 
     // Pass 2: directional stream momentum (also attenuated at high pitcher).
