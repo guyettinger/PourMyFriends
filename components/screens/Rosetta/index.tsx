@@ -136,18 +136,18 @@ const config = {
 
   // Fluid tuning
   DENSITY_DISSIPATION: 0,
-  VELOCITY_DISSIPATION: 0.5,
+  VELOCITY_DISSIPATION: 0.8,
   PRESSURE: 1,
   PRESSURE_ITERATIONS: 2,
   CURL: 0,
 
   // Pour tuning
-  SPLAT_RADIUS: 3.0,
+  SPLAT_RADIUS: 6.0,
   SPLAT_FORCE: 150,
   RADIAL_PUSH: 4.0,
   FOAM_ABSORPTION: 1.0,
   /** Pitcher height: 0 = low (visible "draw"), 1 = high (invisible "fill"). */
-  PITCHER_HEIGHT: 0,
+  PITCHER_HEIGHT: 0.1,
 
   // Latte-art display
   MASK_HARDEN: 0.3,
@@ -155,7 +155,7 @@ const config = {
   SPECULAR_POWER: 48.0,
   SPECULAR_CLAMP: 0.48,
   MILK_OPACITY: 1.0,
-  CREMA_STRENGTH: 0.00,
+  CREMA_STRENGTH: 0.0,
   VALLEY_STRENGTH: 0.9,
   PAUSED: false,
 
@@ -163,7 +163,7 @@ const config = {
   ESPRESSO_COLOR: { r: 0.22, g: 0.12, b: 0.05 } as RGBColor,
   MILK_COLOR: { r: 1.0, g: 0.98, b: 0.96 } as RGBColor,
   /** Crema layer tint — tan-brown froth modulated by crema density. */
-  CREMA_TINT_COLOR: { r: 0.25, g: 0.15, b: 0.10 } as RGBColor,
+  CREMA_TINT_COLOR: { r: 0.25, g: 0.15, b: 0.1 } as RGBColor,
   /** Warm rim tint at the milk↔crema boundary. */
   MILK_RIM_COLOR: { r: 0.45, g: 0.28, b: 0.12 } as RGBColor,
   /** Warm tint applied to specular highlights on the milk. */
@@ -179,14 +179,13 @@ const config = {
 }
 
 /** Convert an RGBColor (0..1 per channel) to a CSS rgb() string for React Native styles. */
-const rgbToCss = (c: RGBColor) =>
-  `rgb(${Math.round(c.r * 255)}, ${Math.round(c.g * 255)}, ${Math.round(c.b * 255)})`
+const rgbToCss = (c: RGBColor) => `rgb(${Math.round(c.r * 255)}, ${Math.round(c.g * 255)}, ${Math.round(c.b * 255)})`
 
 /** Settings modal definitions — single source of truth for adjustable sim params. */
 const SETTING_DEFS = [
   { label: 'Pitcher Height', key: 'PITCHER_HEIGHT', min: 0, max: 1, step: 0.05 },
-  { label: 'Pour Width', key: 'SPLAT_RADIUS', min: 0.5, max: 4.0, step: 0.1 },
-  { label: 'Pour Force', key: 'SPLAT_FORCE', min: 50, max: 300, step: 10 },
+  { label: 'Pour Width', key: 'SPLAT_RADIUS', min: 0.5, max: 10.0, step: 0.1 },
+  { label: 'Pour Force', key: 'SPLAT_FORCE', min: 50, max: 500, step: 10 },
   { label: 'Flow Decay', key: 'VELOCITY_DISSIPATION', min: 0, max: 2, step: 0.1 },
   { label: 'Swirl', key: 'CURL', min: 0, max: 10, step: 0.5 },
   { label: 'Edge Definition', key: 'VALLEY_STRENGTH', min: 0, max: 1, step: 0.05 },
