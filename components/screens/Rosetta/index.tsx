@@ -144,10 +144,10 @@ const config = {
   // Pour tuning
   SPLAT_RADIUS: 6.0,
   SPLAT_FORCE: 150,
-  RADIAL_PUSH: 4.0,
+  RADIAL_PUSH: 1.5,
   FOAM_ABSORPTION: 1.0,
   /** Pitcher height: 0 = low (visible "draw"), 1 = high (invisible "fill"). */
-  PITCHER_HEIGHT: 0.1,
+  PITCHER_HEIGHT: 0.05,
 
   // Latte-art display
   MASK_HARDEN: 0.3,
