@@ -5,9 +5,7 @@ This is an [Expo](https://expo.dev) project created with [`create-expo-app`](htt
 ## 💾 Getting Started
 
 - Install [Node](https://nodejs.org/en/download)
-  - 🟢 Known working version: v22.15.1
 - Install [Yarn](https://yarnpkg.com/)
-  - 🟢 Known working version: v1.22.22
 - Set up device support
   - [Android](https://docs.expo.dev/get-started/set-up-your-environment/?platform=android&device=simulated&mode=development-build&buildEnv=local)
   - [iOS](https://docs.expo.dev/get-started/set-up-your-environment/?platform=ios&device=simulated&mode=development-build&buildEnv=local)
