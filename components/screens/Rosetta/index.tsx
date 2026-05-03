@@ -52,6 +52,8 @@ interface SplatInput {
   pressure: number
   elapsedTime: number
   moveDist: number
+  /** Fraction of the move's total flow this stamp carries (1/N for path stamps, 1 for drip). */
+  weight: number
 }
 
 /** WebGL texture format pair for FBO creation. */
@@ -381,7 +383,7 @@ void main () {
   float dist2 = dot(p, p);
 
   // Isotropic Gaussian for directional and dye passes
-  float s_iso = exp(-dist2 / radius);
+  float s_iso = exp(-dist2 / (radius));
 
   // Anisotropic Gaussian elongated along pour direction for radial pass
   vec2 pourDirAC = normalize(vec2(uPourDir.x * aspectRatio, uPourDir.y));
@@ -679,6 +681,7 @@ export const RosettaScreen = () => {
         pressure,
         elapsedTime,
         moveDist: 0,
+        weight: 1,
       })
     }, 16)
   }
@@ -733,6 +736,9 @@ export const RosettaScreen = () => {
         const step = 0.012
         const steps = Math.max(1, Math.ceil(dist / step))
         const elapsedTime = (Date.now() - pourStartTimeRef.current) / 1000
+        // Per-stamp share of the move's total flow — keeps total injected momentum
+        // per frame constant regardless of sweep speed.
+        const weight = 1 / steps
 
         for (let i = 1; i <= steps; i++) {
           const t = i / steps
@@ -744,6 +750,7 @@ export const RosettaScreen = () => {
             pressure: p,
             elapsedTime,
             moveDist: dist,
+            weight,
           })
         }
 
@@ -1358,13 +1365,13 @@ function onContextCreate(
       const s = splatStackRef.current!.shift()!
       const flowRate = 1.0 + Math.min(0.5, s.elapsedTime * 0.1)
       const pressureScale = 0.7 + 0.3 * s.pressure
-      const radiusPct = config.SPLAT_RADIUS * flowRate * pressureScale
-      const radialForce = config.RADIAL_PUSH * flowRate * pressureScale * 0.5
+      const radiusPct = config.SPLAT_RADIUS / (flowRate * pressureScale)
+      const radialForce = config.RADIAL_PUSH / (flowRate * pressureScale) * s.weight
       splat({
         x: s.x,
         y: s.y,
-        dx: s.dx,
-        dy: s.dy,
+        dx: s.dx * s.weight,
+        dy: s.dy * s.weight,
         color: config.MILK_COLOR,
         radiusPct,
         radialForce,
