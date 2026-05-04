@@ -190,6 +190,12 @@ const config = {
   VALLEY_STRENGTH: 0.9,
   PAUSED: false,
 
+  // Cup geometry & rim look
+  CUP_INSET: 0.85,
+  RIM_THICKNESS_FRAC: 0.04,
+  RIM_COLOR: { r: 0.92, g: 0.88, b: 0.82 } as RGBColor,
+  RIM_SHADOW_COLOR: { r: 0.35, g: 0.28, b: 0.22 } as RGBColor,
+
   // Colors (all as RGBColor — 0..1 per channel).
   ESPRESSO_COLOR: { r: 0.22, g: 0.12, b: 0.05 } as RGBColor,
   MILK_COLOR: { r: 1.0, g: 0.98, b: 0.96 } as RGBColor,
