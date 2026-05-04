@@ -302,6 +302,9 @@ uniform float uSpecularPower;
 uniform float uMaskHarden;
 uniform float uFoamAbsorption;
 uniform float uSpecularClamp;
+uniform vec2 uCupCenter;
+uniform vec2 uCupRadiusUV;
+uniform vec3 uCupBackground;
 
 float hash21(vec2 p) {
   return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -320,6 +323,14 @@ float valueNoise(vec2 p) {
 }
 
 void main () {
+  // Outside-cup branch — render the cup background and skip all fluid logic.
+  vec2 cupOff = (vUv - uCupCenter) / uCupRadiusUV;
+  float r = length(cupOff);
+  if (r > 1.0) {
+    gl_FragColor = vec4(uCupBackground, 1.0);
+    return;
+  }
+
   // All neighbor sampling uses dye's native texel size so we resolve actual
   // dye-cell differences instead of the derivative of bilinear interpolation.
   vec2 d = uDyeTexelSize;
@@ -1057,6 +1068,8 @@ function onContextCreate(
 
   const { ext } = getWebGLContext(gl)
 
+  const cupParams = computeCupParams(gl.drawingBufferWidth, gl.drawingBufferHeight)
+
   // --- Shader compilation ---
 
   function compileShader(type: number, source: string, keywords: string[] | null): WebGLShader {
@@ -1454,6 +1467,14 @@ function onContextCreate(
     gl.uniform1f(displayProgram.uniforms.uFoamAbsorption, config.FOAM_ABSORPTION)
     gl.uniform1f(displayProgram.uniforms.uSpecularClamp, config.SPECULAR_CLAMP)
     gl.uniform2f(displayProgram.uniforms.uDyeTexelSize, dye.texelSizeX, dye.texelSizeY)
+    gl.uniform2f(displayProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
+    gl.uniform2f(displayProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
+    gl.uniform3f(
+      displayProgram.uniforms.uCupBackground,
+      config.CUP_BACKGROUND_COLOR.r,
+      config.CUP_BACKGROUND_COLOR.g,
+      config.CUP_BACKGROUND_COLOR.b,
+    )
     blit(target)
   }
 
