@@ -30,6 +30,35 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context'
 const SCREEN_WIDTH = Dimensions.get('screen').width
 const SCREEN_HEIGHT = Dimensions.get('screen').height
 
+/**
+ * Cup geometry in UV space. The cup is a circle on screen but stored as an ellipse
+ * in UV coordinates so it stays a true circle regardless of aspect ratio.
+ *
+ * `radiusUV` is `[Rx, Ry]` such that `Rx * width === Ry * height`.
+ */
+export interface CupParams {
+  center: [number, number]
+  radiusUV: [number, number]
+  rimThicknessFrac: number
+}
+
+/**
+ * Compute the cup geometry for a given viewport. Used by both the JS PanResponder
+ * (to gate touches) and the GL uniforms (for shader branching) so they agree.
+ *
+ * Cup is centered at (0.5, 0.5) UV with diameter equal to 85% of `min(width, height)`.
+ * Rim band is 4% of the cup radius.
+ */
+export const computeCupParams = (width: number, height: number): CupParams => {
+  const s = Math.min(width, height)
+  const radiusPx = 0.5 * 0.85 * s
+  return {
+    center: [0.5, 0.5],
+    radiusUV: [radiusPx / width, radiusPx / height],
+    rimThicknessFrac: 0.04,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
