@@ -305,6 +305,10 @@ uniform float uSpecularClamp;
 uniform vec2 uCupCenter;
 uniform vec2 uCupRadiusUV;
 uniform vec3 uCupBackground;
+uniform float uRimThicknessFrac;
+uniform vec3 uRimColor;
+uniform vec3 uRimShadowColor;
+uniform float uAspect;
 
 float hash21(vec2 p) {
   return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -328,6 +332,20 @@ void main () {
   float r = length(cupOff);
   if (r > 1.0) {
     gl_FragColor = vec4(uCupBackground, 1.0);
+    return;
+  }
+
+  // Rim band — beveled ceramic, lit with the same light direction as milk.
+  float innerR = 1.0 - uRimThicknessFrac;
+  if (r > innerR) {
+    float rim_t = (r - innerR) / uRimThicknessFrac;                  // 0 at inner edge, 1 at outer
+    vec2 dScreen = (vUv - uCupCenter) * vec2(uAspect, 1.0);          // screen-aspect outward offset
+    vec2 wallDir = dScreen / max(length(dScreen), 0.0001);           // outward direction in screen space
+    vec3 rimNormal = normalize(vec3(wallDir * rim_t, 1.0 - rim_t));  // tilts outward as rim_t increases
+    vec3 lightDir = normalize(vec3(0.2, 0.3, 1.0));                  // matches existing milk lighting
+    float diff = clamp(dot(rimNormal, lightDir), 0.0, 1.0);
+    vec3 rimColor = mix(uRimShadowColor, uRimColor, diff);
+    gl_FragColor = vec4(rimColor, 1.0);
     return;
   }
 
@@ -1475,6 +1493,15 @@ function onContextCreate(
       config.CUP_BACKGROUND_COLOR.g,
       config.CUP_BACKGROUND_COLOR.b,
     )
+    gl.uniform1f(displayProgram.uniforms.uRimThicknessFrac, cupParams.rimThicknessFrac)
+    gl.uniform3f(displayProgram.uniforms.uRimColor, config.RIM_COLOR.r, config.RIM_COLOR.g, config.RIM_COLOR.b)
+    gl.uniform3f(
+      displayProgram.uniforms.uRimShadowColor,
+      config.RIM_SHADOW_COLOR.r,
+      config.RIM_SHADOW_COLOR.g,
+      config.RIM_SHADOW_COLOR.b,
+    )
+    gl.uniform1f(displayProgram.uniforms.uAspect, gl.drawingBufferWidth / gl.drawingBufferHeight)
     blit(target)
   }
 
