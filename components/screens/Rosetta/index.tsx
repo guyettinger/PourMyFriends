@@ -447,8 +447,15 @@ uniform float uMaskMode;
 uniform float uRadialMode;
 uniform float uHeightFactor;
 uniform vec2 uPourDir;
+uniform vec2 uCupCenter;
+uniform vec2 uCupRadiusUV;
 
 void main () {
+  vec2 cupOff = (vUv - uCupCenter) / uCupRadiusUV;
+  if (length(cupOff) > 1.0) {
+    gl_FragColor = vec4(0.0);
+    return;
+  }
   vec2 p_raw = vUv - point.xy;
   vec2 p = vec2(p_raw.x * aspectRatio, p_raw.y);
   float dist2 = dot(p, p);
@@ -1408,6 +1415,8 @@ function onContextCreate(
     gl.uniform2f(splatProgram.uniforms.point, x, y)
     gl.uniform1f(splatProgram.uniforms.uMaskMode, 0.0)
     gl.uniform1f(splatProgram.uniforms.uHeightFactor, h)
+    gl.uniform2f(splatProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
+    gl.uniform2f(splatProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
 
     const len = Math.sqrt(dx * dx + dy * dy)
     const pourDirX = len > 0.0001 ? dx / len : 0.0
