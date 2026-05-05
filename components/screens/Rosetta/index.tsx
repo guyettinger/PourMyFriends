@@ -647,7 +647,14 @@ uniform sampler2D uVelocity;
 uniform vec2 texelSize;
 uniform float dt;
 uniform float dissipation;
+uniform vec2 uCupCenter;
+uniform vec2 uCupRadiusUV;
 void main () {
+  vec2 cupOff = (vUv - uCupCenter) / uCupRadiusUV;
+  if (length(cupOff) > 1.0) {
+    gl_FragColor = vec4(0.0);
+    return;
+  }
   vec4 hat = texture2D(uHat, vUv);
   vec4 bar = texture2D(uBar, vUv);
   vec4 phi0 = texture2D(uField, vUv);
@@ -676,6 +683,8 @@ uniform vec2 texelSize;
 uniform vec2 dyeTexelSize;
 uniform float dt;
 uniform float dissipation;
+uniform vec2 uCupCenter;
+uniform vec2 uCupRadiusUV;
 vec4 bilerp (sampler2D sam, vec2 uv, vec2 tsize) {
   vec2 st = uv / tsize - 0.5;
   vec2 iuv = floor(st);
@@ -687,6 +696,11 @@ vec4 bilerp (sampler2D sam, vec2 uv, vec2 tsize) {
   return mix(mix(a, b, fuv.x), mix(c, d, fuv.x), fuv.y);
 }
 void main () {
+  vec2 cupOff = (vUv - uCupCenter) / uCupRadiusUV;
+  if (length(cupOff) > 1.0) {
+    gl_FragColor = vec4(0.0);
+    return;
+  }
 #ifdef MANUAL_FILTERING
   vec2 coord = vUv - dt * bilerp(uVelocity, vUv, texelSize).xy * texelSize;
   vec4 result = bilerp(uSource, coord, dyeTexelSize);
@@ -1588,6 +1602,8 @@ function onContextCreate(
 
     // Advect velocity — MacCormack (forward, backward, correct+clamp).
     advectionProgram.bind()
+    gl.uniform2f(advectionProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
+    gl.uniform2f(advectionProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
     if (!ext.supportLinearFiltering)
       gl.uniform2f(advectionProgram.uniforms.dyeTexelSize, velocity.texelSizeX, velocity.texelSizeY)
     // Forward: phi_hat = advect(phi, v, +dt)
@@ -1606,6 +1622,8 @@ function onContextCreate(
     blit(velBar)
     // Combine: velocity.write = clamp(phi_hat + 0.5*(phi - phi_bar))
     macCormackProgram.bind()
+    gl.uniform2f(macCormackProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
+    gl.uniform2f(macCormackProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
     velId = velocity.read.attach(0)
     gl.uniform1i(macCormackProgram.uniforms.uField, velId)
     gl.uniform1i(macCormackProgram.uniforms.uVelocity, velId)
@@ -1618,6 +1636,8 @@ function onContextCreate(
 
     // Advect dye (milk + crema channels) — MacCormack.
     advectionProgram.bind()
+    gl.uniform2f(advectionProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
+    gl.uniform2f(advectionProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
     if (!ext.supportLinearFiltering)
       gl.uniform2f(advectionProgram.uniforms.dyeTexelSize, dye.texelSizeX, dye.texelSizeY)
     // Forward
@@ -1634,6 +1654,8 @@ function onContextCreate(
     blit(dyeBar)
     // Combine
     macCormackProgram.bind()
+    gl.uniform2f(macCormackProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
+    gl.uniform2f(macCormackProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
     gl.uniform1i(macCormackProgram.uniforms.uField, dye.read.attach(0))
     gl.uniform1i(macCormackProgram.uniforms.uVelocity, velocity.read.attach(1))
     gl.uniform1i(macCormackProgram.uniforms.uHat, dyeHat.attach(2))
