@@ -713,6 +713,11 @@ export const RosettaScreen = () => {
 
   const insets = useSafeAreaInsets()
 
+  const cupParams = React.useMemo(
+    () => computeCupParams(SCREEN_WIDTH, SCREEN_HEIGHT),
+    [],
+  )
+
   /** Adjust a single setting by delta, clamped to [min, max]. Mutates config immediately. */
   const adjustSetting = (key: keyof SimSettings, delta: number, min: number, max: number) => {
     setSettings((prev) => {
@@ -765,6 +770,13 @@ export const RosettaScreen = () => {
     }
   }
 
+  const isInsideCup = (x: number, y: number) => {
+    const dx = (x - cupParams.center[0]) / cupParams.radiusUV[0]
+    const dy = (y - cupParams.center[1]) / cupParams.radiusUV[1]
+    const r = Math.sqrt(dx * dx + dy * dy)
+    return r <= 1.0 - cupParams.rimThicknessFrac
+  }
+
   /** Memoized PanResponder; reads config inline so it tracks live setting changes. */
   const panResponderRef = useRef(
     PanResponder.create({
@@ -773,9 +785,10 @@ export const RosettaScreen = () => {
       onMoveShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponderCapture: () => true,
       onPanResponderGrant: (evt) => {
-        touchingRef.current = true
         const x = evt.nativeEvent.locationX / SCREEN_WIDTH
         const y = 1.0 - evt.nativeEvent.locationY / SCREEN_HEIGHT
+        if (!isInsideCup(x, y)) return
+        touchingRef.current = true
         lastTouchRef.current = { x, y }
         const pressure = (evt.nativeEvent as unknown as { force?: number }).force || 1.0
         touchPressureRef.current = Math.max(0.1, Math.min(1.0, pressure))
@@ -788,6 +801,11 @@ export const RosettaScreen = () => {
 
         const newX = evt.nativeEvent.locationX / SCREEN_WIDTH
         const newY = 1.0 - evt.nativeEvent.locationY / SCREEN_HEIGHT
+        if (!isInsideCup(newX, newY)) {
+          // Drag is outside the cup — suppress splat injection, but keep the touch alive
+          // so re-entering the cup resumes pouring without requiring lift+touch.
+          return
+        }
         const pressure = (evt.nativeEvent as unknown as { force?: number }).force || 1.0
         const p = Math.max(0.1, Math.min(1.0, pressure))
         touchPressureRef.current = p
