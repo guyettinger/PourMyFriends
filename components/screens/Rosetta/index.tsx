@@ -412,7 +412,14 @@ void main () {
   vec3 milkCol = uMilk * (0.8 + 0.2 * diff) + warmSpec;
   vec3 base = mix(cupSurface, uMilkRim, smoothstep(0.0, 0.3, maskAlpha));
   vec3 c = mix(base, clamp(milkCol, 0.0, 1.0), smoothstep(0.2, 0.85, maskAlpha));
-  gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+
+  // Inner-edge shadow: rim casts a soft shadow onto the latte. Shadow band is
+  // 0.05 cup-radius wide, ending at the inner rim. Dim up to 45% at the wall.
+  float innerEdge = 1.0 - uRimThicknessFrac;
+  float shadowBand = smoothstep(innerEdge, innerEdge - 0.05, r);
+  vec3 finalColor = c * mix(0.55, 1.0, shadowBand);
+
+  gl_FragColor = vec4(clamp(finalColor, 0.0, 1.0), 1.0);
 }
 `
 
