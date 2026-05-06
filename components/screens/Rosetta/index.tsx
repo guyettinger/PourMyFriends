@@ -1526,7 +1526,7 @@ function onContextCreate(
     let processed = 0
     while ((splatStackRef.current?.length ?? 0) > 0 && processed < maxSplatsPerFrame) {
       const s = splatStackRef.current!.shift()!
-      const flowRate = 1.0 + Math.min(0.5, s.elapsedTime * 0.1)
+      const flowRate = 1.0 //+ Math.min(0.5, s.elapsedTime * 0.1)
       const pressureScale = 0.7 + 0.3 * s.pressure
       const radiusPct = config.SPLAT_RADIUS / (flowRate * pressureScale)
       const radialForce = config.RADIAL_PUSH / (flowRate * pressureScale) * s.weight
