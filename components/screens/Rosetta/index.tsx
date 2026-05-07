@@ -20,7 +20,7 @@ import {
   curlShader,
   vorticityShader,
   divergenceShader,
-  clearShader,
+  scaleShader,
   pressureShader,
   gradientShader,
   macCormackShader,
@@ -188,7 +188,10 @@ const config = {
 
   // Pour tuning
   SPLAT_RADIUS: 4.0,
-  SPLAT_FORCE: 200,
+  // Halved (was 200) when advection.frag's trace switched from the dye-grid
+  // texelSize to the velocity-grid uVelTexelSize — same touch motion now produces
+  // ~2× the dye displacement, so the velocity injection is scaled down to match.
+  SPLAT_FORCE: 100,
   RADIAL_PUSH: 0.25,
   FOAM_ABSORPTION: 1.0,
   /** Pitcher height: 0 = low (visible "draw"), 1 = high (invisible "fill"). */
@@ -734,7 +737,7 @@ function onContextCreate(
   const curlFrag = compileShader(gl.FRAGMENT_SHADER, curlShader, ['curlFrag'])
   const vorticityFrag = compileShader(gl.FRAGMENT_SHADER, vorticityShader, ['vorticityFrag'])
   const divergenceFrag = compileShader(gl.FRAGMENT_SHADER, divergenceShader, ['divergenceFrag'])
-  const clearFrag = compileShader(gl.FRAGMENT_SHADER, clearShader, ['clearFrag'])
+  const scaleFrag = compileShader(gl.FRAGMENT_SHADER, scaleShader, ['scaleFrag'])
   const pressureFrag = compileShader(gl.FRAGMENT_SHADER, pressureShader, ['pressureFrag'])
   const gradientFrag = compileShader(gl.FRAGMENT_SHADER, gradientShader, ['gradientFrag'])
   const advectionFrag = compileShader(
@@ -749,7 +752,7 @@ function onContextCreate(
   const curlProgram = makeProgram(baseVertex, curlFrag)
   const vorticityProgram = makeProgram(baseVertex, vorticityFrag)
   const divergenceProgram = makeProgram(baseVertex, divergenceFrag)
-  const clearProgram = makeProgram(baseVertex, clearFrag)
+  const scaleProgram = makeProgram(baseVertex, scaleFrag)
   const pressureProgram = makeProgram(baseVertex, pressureFrag)
   const gradientSubtractProgram = makeProgram(baseVertex, gradientFrag)
   const advectionProgram = makeProgram(baseVertex, advectionFrag)
@@ -774,7 +777,7 @@ function onContextCreate(
       }
       const texelX = target ? 1.0 / target.width : 1.0 / gl.drawingBufferWidth
       const texelY = target ? 1.0 / target.height : 1.0 / gl.drawingBufferHeight
-      const loc = currentGLProgram?.uniforms.texelSize
+      const loc = currentGLProgram?.uniforms.uTexelSize
       if (loc) gl.uniform2f(loc, texelX, texelY)
 
       if (clear) {
@@ -966,8 +969,8 @@ function onContextCreate(
 
     splatProgram.bind()
     gl.uniform1i(splatProgram.uniforms.uTarget, velocity.read.attach(0))
-    gl.uniform1f(splatProgram.uniforms.aspectRatio, gl.drawingBufferWidth / gl.drawingBufferHeight)
-    gl.uniform2f(splatProgram.uniforms.point, x, y)
+    gl.uniform1f(splatProgram.uniforms.uAspectRatio, gl.drawingBufferWidth / gl.drawingBufferHeight)
+    gl.uniform2f(splatProgram.uniforms.uPoint, x, y)
     gl.uniform1f(splatProgram.uniforms.uMaskMode, 0.0)
     gl.uniform1f(splatProgram.uniforms.uHeightFactor, h)
     gl.uniform2f(splatProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
@@ -982,8 +985,8 @@ function onContextCreate(
     // High pitcher deposits less momentum — gentler stream.
     if (radialForce != null && radialForce > 0) {
       const scaledRadial = radialForce * (1.0 - 0.6 * h)
-      gl.uniform3f(splatProgram.uniforms.color, scaledRadial, 0.0, 0.0)
-      gl.uniform1f(splatProgram.uniforms.radius, radius * 4.0)
+      gl.uniform3f(splatProgram.uniforms.uColor, scaledRadial, 0.0, 0.0)
+      gl.uniform1f(splatProgram.uniforms.uRadius, radius * 4.0)
       gl.uniform1f(splatProgram.uniforms.uRadialMode, 1.0)
       blit(velocity.write)
       velocity.swap()
@@ -996,15 +999,15 @@ function onContextCreate(
 
     // Pass 2: directional stream momentum (also attenuated at high pitcher).
     const velScale = 1.0 - 0.6 * h
-    gl.uniform3f(splatProgram.uniforms.color, dx * velScale, dy * velScale, 0.0)
-    gl.uniform1f(splatProgram.uniforms.radius, radius)
+    gl.uniform3f(splatProgram.uniforms.uColor, dx * velScale, dy * velScale, 0.0)
+    gl.uniform1f(splatProgram.uniforms.uRadius, radius)
     gl.uniform1f(splatProgram.uniforms.uRadialMode, 0.0)
     blit(velocity.write)
     velocity.swap()
 
     // Pass 3: dye deposit (milk mask in r, crema erosion in g — handled by shader).
     gl.uniform1i(splatProgram.uniforms.uTarget, dye.read.attach(0))
-    gl.uniform3f(splatProgram.uniforms.color, color.r, color.g, color.b)
+    gl.uniform3f(splatProgram.uniforms.uColor, color.r, color.g, color.b)
     gl.uniform1f(splatProgram.uniforms.uMaskMode, 1.0)
     blit(dye.write)
     dye.swap()
@@ -1100,37 +1103,37 @@ function onContextCreate(
 
     if (config.CURL !== 0) {
       curlProgram.bind()
-      gl.uniform2f(curlProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
       gl.uniform1i(curlProgram.uniforms.uVelocity, velocity.read.attach(0))
+      gl.uniform2f(curlProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
+      gl.uniform2f(curlProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
       blit(curl)
 
       vorticityProgram.bind()
-      gl.uniform2f(vorticityProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
       gl.uniform1i(vorticityProgram.uniforms.uVelocity, velocity.read.attach(0))
       gl.uniform1i(vorticityProgram.uniforms.uCurl, curl.attach(1))
-      gl.uniform1f(vorticityProgram.uniforms.curl, config.CURL)
-      gl.uniform1f(vorticityProgram.uniforms.dt, dt)
+      gl.uniform1f(vorticityProgram.uniforms.uCurlStrength, config.CURL)
+      gl.uniform1f(vorticityProgram.uniforms.uDt, dt)
+      gl.uniform2f(vorticityProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
+      gl.uniform2f(vorticityProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
       blit(velocity.write)
       velocity.swap()
     }
 
     divergenceProgram.bind()
-    gl.uniform2f(divergenceProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
     gl.uniform1i(divergenceProgram.uniforms.uVelocity, velocity.read.attach(0))
     gl.uniform2f(divergenceProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
     gl.uniform2f(divergenceProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
     blit(divergence)
 
-    clearProgram.bind()
-    gl.uniform1i(clearProgram.uniforms.uTexture, pressure.read.attach(0))
-    gl.uniform1f(clearProgram.uniforms.value, config.PRESSURE)
+    scaleProgram.bind()
+    gl.uniform1i(scaleProgram.uniforms.uSource, pressure.read.attach(0))
+    gl.uniform1f(scaleProgram.uniforms.uValue, config.PRESSURE)
     blit(pressure.write)
     pressure.swap()
 
     pressureProgram.bind()
     gl.uniform2f(pressureProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
     gl.uniform2f(pressureProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
-    gl.uniform2f(pressureProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
     gl.uniform1i(pressureProgram.uniforms.uDivergence, divergence.attach(0))
     for (let i = 0; i < config.PRESSURE_ITERATIONS; i++) {
       gl.uniform1i(pressureProgram.uniforms.uPressure, pressure.read.attach(1))
@@ -1141,43 +1144,46 @@ function onContextCreate(
     gradientSubtractProgram.bind()
     gl.uniform2f(gradientSubtractProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
     gl.uniform2f(gradientSubtractProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
-    gl.uniform2f(gradientSubtractProgram.uniforms.texelSize, velocity.texelSizeX, velocity.texelSizeY)
     gl.uniform1i(gradientSubtractProgram.uniforms.uPressure, pressure.read.attach(0))
     gl.uniform1i(gradientSubtractProgram.uniforms.uVelocity, velocity.read.attach(1))
     blit(velocity.write)
     velocity.swap()
 
     // Advect velocity — MacCormack (forward, backward, correct+clamp).
+    // uVelTexelSize is bound from the velocity grid for ALL advection passes
+    // so the trace covers the same UV distance regardless of target FBO.
     advectionProgram.bind()
     gl.uniform2f(advectionProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
     gl.uniform2f(advectionProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
+    gl.uniform2f(advectionProgram.uniforms.uVelTexelSize, velocity.texelSizeX, velocity.texelSizeY)
     if (!ext.supportLinearFiltering)
-      gl.uniform2f(advectionProgram.uniforms.dyeTexelSize, velocity.texelSizeX, velocity.texelSizeY)
+      gl.uniform2f(advectionProgram.uniforms.uDyeTexelSize, velocity.texelSizeX, velocity.texelSizeY)
     // Forward: phi_hat = advect(phi, v, +dt)
     let velId = velocity.read.attach(0)
     gl.uniform1i(advectionProgram.uniforms.uVelocity, velId)
     gl.uniform1i(advectionProgram.uniforms.uSource, velId)
-    gl.uniform1f(advectionProgram.uniforms.dt, dt)
-    gl.uniform1f(advectionProgram.uniforms.dissipation, 0.0)
+    gl.uniform1f(advectionProgram.uniforms.uDt, dt)
+    gl.uniform1f(advectionProgram.uniforms.uDissipation, 0.0)
     blit(velHat)
     // Backward: phi_bar = advect(phi_hat, v, -dt)
     velId = velocity.read.attach(0)
     gl.uniform1i(advectionProgram.uniforms.uVelocity, velId)
     gl.uniform1i(advectionProgram.uniforms.uSource, velHat.attach(1))
-    gl.uniform1f(advectionProgram.uniforms.dt, -dt)
-    gl.uniform1f(advectionProgram.uniforms.dissipation, 0.0)
+    gl.uniform1f(advectionProgram.uniforms.uDt, -dt)
+    gl.uniform1f(advectionProgram.uniforms.uDissipation, 0.0)
     blit(velBar)
     // Combine: velocity.write = clamp(phi_hat + 0.5*(phi - phi_bar))
     macCormackProgram.bind()
     gl.uniform2f(macCormackProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
     gl.uniform2f(macCormackProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
+    gl.uniform2f(macCormackProgram.uniforms.uVelTexelSize, velocity.texelSizeX, velocity.texelSizeY)
     velId = velocity.read.attach(0)
     gl.uniform1i(macCormackProgram.uniforms.uField, velId)
     gl.uniform1i(macCormackProgram.uniforms.uVelocity, velId)
     gl.uniform1i(macCormackProgram.uniforms.uHat, velHat.attach(1))
     gl.uniform1i(macCormackProgram.uniforms.uBar, velBar.attach(2))
-    gl.uniform1f(macCormackProgram.uniforms.dt, dt)
-    gl.uniform1f(macCormackProgram.uniforms.dissipation, config.VELOCITY_DISSIPATION)
+    gl.uniform1f(macCormackProgram.uniforms.uDt, dt)
+    gl.uniform1f(macCormackProgram.uniforms.uDissipation, config.VELOCITY_DISSIPATION)
     blit(velocity.write)
     velocity.swap()
 
@@ -1185,30 +1191,32 @@ function onContextCreate(
     advectionProgram.bind()
     gl.uniform2f(advectionProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
     gl.uniform2f(advectionProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
+    gl.uniform2f(advectionProgram.uniforms.uVelTexelSize, velocity.texelSizeX, velocity.texelSizeY)
     if (!ext.supportLinearFiltering)
-      gl.uniform2f(advectionProgram.uniforms.dyeTexelSize, dye.texelSizeX, dye.texelSizeY)
+      gl.uniform2f(advectionProgram.uniforms.uDyeTexelSize, dye.texelSizeX, dye.texelSizeY)
     // Forward
     gl.uniform1i(advectionProgram.uniforms.uVelocity, velocity.read.attach(0))
     gl.uniform1i(advectionProgram.uniforms.uSource, dye.read.attach(1))
-    gl.uniform1f(advectionProgram.uniforms.dt, dt)
-    gl.uniform1f(advectionProgram.uniforms.dissipation, 0.0)
+    gl.uniform1f(advectionProgram.uniforms.uDt, dt)
+    gl.uniform1f(advectionProgram.uniforms.uDissipation, 0.0)
     blit(dyeHat)
     // Backward
     gl.uniform1i(advectionProgram.uniforms.uVelocity, velocity.read.attach(0))
     gl.uniform1i(advectionProgram.uniforms.uSource, dyeHat.attach(1))
-    gl.uniform1f(advectionProgram.uniforms.dt, -dt)
-    gl.uniform1f(advectionProgram.uniforms.dissipation, 0.0)
+    gl.uniform1f(advectionProgram.uniforms.uDt, -dt)
+    gl.uniform1f(advectionProgram.uniforms.uDissipation, 0.0)
     blit(dyeBar)
     // Combine
     macCormackProgram.bind()
     gl.uniform2f(macCormackProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
     gl.uniform2f(macCormackProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
+    gl.uniform2f(macCormackProgram.uniforms.uVelTexelSize, velocity.texelSizeX, velocity.texelSizeY)
     gl.uniform1i(macCormackProgram.uniforms.uField, dye.read.attach(0))
     gl.uniform1i(macCormackProgram.uniforms.uVelocity, velocity.read.attach(1))
     gl.uniform1i(macCormackProgram.uniforms.uHat, dyeHat.attach(2))
     gl.uniform1i(macCormackProgram.uniforms.uBar, dyeBar.attach(3))
-    gl.uniform1f(macCormackProgram.uniforms.dt, dt)
-    gl.uniform1f(macCormackProgram.uniforms.dissipation, config.DENSITY_DISSIPATION)
+    gl.uniform1f(macCormackProgram.uniforms.uDt, dt)
+    gl.uniform1f(macCormackProgram.uniforms.uDissipation, config.DENSITY_DISSIPATION)
     blit(dye.write)
     dye.swap()
   }

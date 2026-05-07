@@ -4,7 +4,7 @@ import splatShader from './splat.frag'
 import curlShader from './curl.frag'
 import vorticityShader from './vorticity.frag'
 import divergenceShader from './divergence.frag'
-import clearShader from './clear.frag'
+import scaleShader from './scale.frag'
 import pressureShader from './pressure.frag'
 import gradientShader from './gradient.frag'
 import macCormackShader from './macCormack.frag'
@@ -17,7 +17,7 @@ export {
   curlShader,
   vorticityShader,
   divergenceShader,
-  clearShader,
+  scaleShader,
   pressureShader,
   gradientShader,
   macCormackShader,

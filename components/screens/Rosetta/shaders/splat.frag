@@ -1,11 +1,20 @@
+// splat.frag — Inject a Gaussian splat into velocity OR dye field.
+// Reads:  uTarget (current field), uPoint, uColor, uRadius, uAspectRatio,
+//         uMaskMode (0=velocity / 1=dye), uRadialMode (0=directional / 1=radial),
+//         uHeightFactor (pitcher height 0..1), uPourDir, uCupCenter, uCupRadiusUV.
+// Writes: velocity (RG) or dye (R=milk visibility, G=crema density).
+// Math:   Anisotropic Gaussian; for radial mode, perpendicular axis spreads wider
+//         (lateral fan-out); for dye mode, uses Beer-Lambert-style accumulation.
+
 precision highp float;
 precision highp sampler2D;
+
 varying vec2 vUv;
 uniform sampler2D uTarget;
-uniform float aspectRatio;
-uniform vec3 color;
-uniform vec2 point;
-uniform float radius;
+uniform float uAspectRatio;
+uniform vec3 uColor;
+uniform vec2 uPoint;
+uniform float uRadius;
 uniform float uMaskMode;
 uniform float uRadialMode;
 uniform float uHeightFactor;
@@ -19,39 +28,36 @@ void main () {
     gl_FragColor = vec4(0.0);
     return;
   }
-  vec2 p_raw = vUv - point.xy;
-  vec2 p = vec2(p_raw.x * aspectRatio, p_raw.y);
+  vec2 p_raw = vUv - uPoint.xy;
+  vec2 p = vec2(p_raw.x * uAspectRatio, p_raw.y);
   float dist2 = dot(p, p);
 
-  // Isotropic Gaussian for directional and dye passes
-  float s_iso = exp(-dist2 / (radius));
+  float s_iso = exp(-dist2 / uRadius);
 
-  // Anisotropic Gaussian elongated along pour direction for radial pass
-  vec2 pourDirAC = normalize(vec2(uPourDir.x * aspectRatio, uPourDir.y));
+  // Anisotropic Gaussian for radial pass: tighter along the pour axis,
+  // wider perpendicular to it — a sideways fan that spreads radially.
+  vec2 pourDirAC = normalize(vec2(uPourDir.x * uAspectRatio, uPourDir.y));
   float pPar = dot(p, pourDirAC);
   vec2 pPerpVec = p - pPar * pourDirAC;
   float pPerp2 = dot(pPerpVec, pPerpVec);
-  float s_aniso = exp(-(pPar * pPar / (radius * 0.25) + pPerp2 / radius));
+  float s_aniso = exp(-(pPar * pPar / (uRadius * 0.25) + pPerp2 / uRadius));
 
   float s = mix(s_iso, s_aniso, uRadialMode);
-
   vec4 base = texture2D(uTarget, vUv);
 
   if (uMaskMode > 0.5) {
-    // Dye deposit: milk visibility in r, crema erosion in g
+    // Dye deposit. Pitcher height attenuates milk visibility (high = "fill"
+    // pour, low = "draw" pour) and modulates how aggressively crema is disrupted.
     float drawVis = 1.0 - uHeightFactor;
-    float milkStrength = s * color.r * drawVis;
+    float milkStrength = s * uColor.r * drawVis;
     float newR = max(base.r, milkStrength);
-    // Crema is disrupted more at low pitcher (splashing through it)
-    // and less at high pitcher (gentle displacement from below)
     float cremaDisrupt = s * mix(0.12, 0.85, drawVis);
     float newG = max(0.0, base.g - cremaDisrupt);
     gl_FragColor = vec4(newR, newG, base.b, 1.0);
   } else {
-    // Velocity injection (directional or radial)
     vec2 outward = p / (sqrt(dist2) + 0.0001);
-    vec2 radialVel = vec2(outward.x / aspectRatio, outward.y) * color.r;
-    vec2 vel = mix(color.xy, radialVel, uRadialMode);
+    vec2 radialVel = vec2(outward.x / uAspectRatio, outward.y) * uColor.r;
+    vec2 vel = mix(uColor.xy, radialVel, uRadialMode);
     vec3 splat = vec3(vel, 0.0) * s;
     gl_FragColor = vec4(base.xyz + splat, 1.0);
   }

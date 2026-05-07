@@ -1,10 +1,21 @@
+// display.frag — Final composite: cup background + ceramic rim + espresso/crema
+// surface + advected milk dye with Beer-Lambert opacity, valley shading,
+// directional lighting, and warm specular highlight.
+// Reads:  uTexture (dye RG = milk visibility, crema density), color uniforms,
+//         shaping params (uMaskHarden, uFoamAbsorption, uMilkOpacity, etc.),
+//         uDyeTexelSize (NOT the display target's texel size — see below),
+//         cup geometry, uAspect.
+// Writes: composited RGB.
+// Note:   We resample neighbors locally with uDyeTexelSize because the
+//         shared base.vert varyings vL/vR/vT/vB are bound to the display
+//         target's texel size (much finer than the dye grid), which would
+//         resolve as bilinear-interpolated streaks instead of true dye-cell
+//         differences for the Laplacian / tent kernel / gradient.
+
 precision highp float;
 precision highp sampler2D;
+
 varying vec2 vUv;
-varying vec2 vL;
-varying vec2 vR;
-varying vec2 vT;
-varying vec2 vB;
 uniform sampler2D uTexture;
 uniform vec3 uEspresso;
 uniform vec3 uMilk;
@@ -12,13 +23,7 @@ uniform vec3 uCremaTint;
 uniform vec3 uMilkRim;
 uniform vec3 uSpecularTint;
 uniform float uMilkOpacity;
-uniform vec2 texelSize;
-// Native texel size of the dye texture (NOT the display target).
-// The baseVertex varyings vL/vR/vT/vB use texelSize = display target's size,
-// which is much finer than the dye grid; sampling at those offsets produces
-// sub-dye-texel differences that alias to the 512-grid as directional streaks.
-// We override with this uniform so Laplacian / tent / gradient see real
-// dye neighbors.
+uniform vec2 uTexelSize;
 uniform vec2 uDyeTexelSize;
 uniform float uValleyStrength;
 uniform float uCremaStrength;
@@ -35,12 +40,20 @@ uniform vec3 uRimColor;
 uniform vec3 uRimShadowColor;
 uniform float uAspect;
 
-float hash21(vec2 p) {
+// Look-and-feel constants. Promoted out of inline magic numbers so a future
+// tuner can locate them without grepping the body.
+const vec3 LIGHT_DIR = vec3(0.2, 0.3, 1.0);     // unnormalized; normalized at use
+const float NORMAL_Z_BIAS = 0.15;               // raises the surface so flats stay lit
+const float NOISE_FREQ = 120.0;                 // crema grain spatial frequency
+const float RIM_SHADOW_BAND = 0.05;             // soft shadow band width (cup-radius units)
+const float RIM_SHADOW_FLOOR = 0.55;            // shadow minimum brightness multiplier
+const float VALLEY_GAIN = 3.0;                  // valley Laplacian boost
+
+float hash21 (vec2 p) {
   return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
 
-// Bilinear-interpolated value noise — smooth over space, no pixelated hash grid.
-float valueNoise(vec2 p) {
+float valueNoise (vec2 p) {
   vec2 i = floor(p);
   vec2 f = fract(p);
   float a = hash21(i);
@@ -52,7 +65,6 @@ float valueNoise(vec2 p) {
 }
 
 void main () {
-  // Outside-cup branch — render the cup background and skip all fluid logic.
   vec2 cupOff = (vUv - uCupCenter) / uCupRadiusUV;
   float r = length(cupOff);
   if (r > 1.0) {
@@ -60,22 +72,20 @@ void main () {
     return;
   }
 
-  // Rim band — beveled ceramic, lit with the same light direction as milk.
+  // Beveled ceramic rim band lit by the same light direction as the milk.
   float innerR = 1.0 - uRimThicknessFrac;
   if (r > innerR) {
-    float rim_t = (r - innerR) / uRimThicknessFrac;                  // 0 at inner edge, 1 at outer
-    vec2 dScreen = (vUv - uCupCenter) * vec2(uAspect, 1.0);          // screen-aspect outward offset
-    vec2 wallDir = dScreen / max(length(dScreen), 0.0001);           // outward direction in screen space
-    vec3 rimNormal = normalize(vec3(wallDir * rim_t, 1.0 - rim_t));  // tilts outward as rim_t increases
-    vec3 lightDir = normalize(vec3(0.2, 0.3, 1.0));                  // matches existing milk lighting
+    float rim_t = (r - innerR) / uRimThicknessFrac;
+    vec2 dScreen = (vUv - uCupCenter) * vec2(uAspect, 1.0);
+    vec2 wallDir = dScreen / max(length(dScreen), 0.0001);
+    vec3 rimNormal = normalize(vec3(wallDir * rim_t, 1.0 - rim_t));
+    vec3 lightDir = normalize(LIGHT_DIR);
     float diff = clamp(dot(rimNormal, lightDir), 0.0, 1.0);
     vec3 rimColor = mix(uRimShadowColor, uRimColor, diff);
     gl_FragColor = vec4(rimColor, 1.0);
     return;
   }
 
-  // All neighbor sampling uses dye's native texel size so we resolve actual
-  // dye-cell differences instead of the derivative of bilinear interpolation.
   vec2 d = uDyeTexelSize;
   vec2 uvL = vUv - vec2(d.x, 0.0);
   vec2 uvR = vUv + vec2(d.x, 0.0);
@@ -87,50 +97,39 @@ void main () {
   float mr = texture2D(uTexture, uvR).r;
   float mt = texture2D(uTexture, uvT).r;
   float mb = texture2D(uTexture, uvB).r;
-
-  // Diagonal samples for 3x3 tent kernel
   float mtl = texture2D(uTexture, vUv + vec2(-d.x,  d.y)).r;
   float mtr = texture2D(uTexture, vUv + vec2( d.x,  d.y)).r;
   float mbl = texture2D(uTexture, vUv + vec2(-d.x, -d.y)).r;
   float mbr = texture2D(uTexture, vUv + vec2( d.x, -d.y)).r;
 
-  // 3x3 tent blur (proper — now spans real dye texels)
+  // 3×3 tent kernel.
   float edges = ml + mr + mt + mb;
   float corners = mtl + mtr + mbl + mbr;
-  float mBlur = (4.0*m + 2.0*edges + corners) / 16.0;
+  float mBlur = (4.0 * m + 2.0 * edges + corners) / 16.0;
 
-  // Valley detection: Laplacian at dye-texel scale (stable, not display-res).
   float laplacian = ml + mr + mt + mb - 4.0 * m;
-  float valley = clamp(laplacian * uValleyStrength * 3.0, 0.0, 1.0);
+  float valley = clamp(laplacian * uValleyStrength * VALLEY_GAIN, 0.0, 1.0);
 
-  // Beer-Lambert opacity: thin foam is translucent, thick foam is opaque
   float physAlpha = 1.0 - exp(-uFoamAbsorption * mBlur);
 
-  // Sharpen the milk-espresso boundary
   float lo = mix(0.0, 0.3, uMaskHarden);
   float hi = mix(1.0, 0.65, uMaskHarden);
   float mEdge = smoothstep(lo, hi, physAlpha);
   float maskAlpha = clamp((mEdge - valley * 0.5) * uMilkOpacity, 0.0, 1.0);
 
-  // Directional lighting from dye-texel-scale gradient (no bilinear aliasing).
   float dx = mr - ml;
   float dy = mt - mb;
-  vec3 n = normalize(vec3(dx, dy, 0.15));
-  vec3 lightDir = normalize(vec3(0.2, 0.3, 1.0));
+  vec3 n = normalize(vec3(dx, dy, NORMAL_Z_BIAS));
+  vec3 lightDir = normalize(LIGHT_DIR);
   float diff = clamp(dot(n, lightDir), 0.0, 1.0);
 
-  // Smooth grain — value noise at a frequency chosen so the cell is many
-  // display pixels across (no per-pixel stipple).
-  float grain = 1.0 - uCremaStrength * valueNoise(vUv * 120.0);
+  float grain = 1.0 - uCremaStrength * valueNoise(vUv * NOISE_FREQ);
   vec3 espresso = uEspresso * grain;
 
-  // Crema layer — tan-brown froth that sits on the espresso.
-  // Density (dye.g) starts at 1.0 everywhere; pours erode it.
   float cremaDensity = texture2D(uTexture, vUv).g;
   vec3 cremaTint = uCremaTint * grain;
   vec3 cupSurface = mix(espresso, cremaTint, cremaDensity);
 
-  // Specular highlight gated by maskAlpha with warm tint
   float spec = pow(max(n.z, 0.0), uSpecularPower) * uMilkSpecular * maskAlpha;
   spec = min(spec, uSpecularClamp);
   vec3 warmSpec = spec * uSpecularTint;
@@ -138,11 +137,10 @@ void main () {
   vec3 base = mix(cupSurface, uMilkRim, smoothstep(0.0, 0.3, maskAlpha));
   vec3 c = mix(base, clamp(milkCol, 0.0, 1.0), smoothstep(0.2, 0.85, maskAlpha));
 
-  // Inner-edge shadow: rim casts a soft shadow onto the latte. Shadow band is
-  // 0.05 cup-radius wide, ending at the inner rim. Dim up to 45% at the wall.
+  // Inner-rim shadow band — rim casts onto the latte surface.
   float innerEdge = 1.0 - uRimThicknessFrac;
-  float shadowBand = smoothstep(innerEdge, innerEdge - 0.05, r);
-  vec3 finalColor = c * mix(0.55, 1.0, shadowBand);
+  float shadowBand = smoothstep(innerEdge, innerEdge - RIM_SHADOW_BAND, r);
+  vec3 finalColor = c * mix(RIM_SHADOW_FLOOR, 1.0, shadowBand);
 
   gl_FragColor = vec4(clamp(finalColor, 0.0, 1.0), 1.0);
 }

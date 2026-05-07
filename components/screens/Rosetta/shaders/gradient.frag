@@ -1,14 +1,25 @@
-precision mediump float;
-precision mediump sampler2D;
-varying highp vec2 vUv;
-varying highp vec2 vL;
-varying highp vec2 vR;
-varying highp vec2 vT;
-varying highp vec2 vB;
+// gradient.frag — Subtract pressure gradient from velocity to enforce ∇·u = 0.
+// Reads:  uPressure, uVelocity, neighbors, cup uniforms.
+// Writes: corrected velocity (RG).
+// Math:   u_new = u − ∇p, with ∇p = (p_R − p_L, p_T − p_B). The 2× scale
+//         vs. the canonical central-difference is intentional: divergence.frag
+//         carries the matching 0.5; the constant factor lives in pressure and
+//         the projection is still mathematically correct.
+//         Cup wall: Neumann (ghost = center) — same as pressure.frag.
+
+precision highp float;
+precision highp sampler2D;
+
+varying vec2 vUv;
+varying vec2 vL;
+varying vec2 vR;
+varying vec2 vT;
+varying vec2 vB;
 uniform sampler2D uPressure;
 uniform sampler2D uVelocity;
 uniform vec2 uCupCenter;
 uniform vec2 uCupRadiusUV;
+
 void main () {
   vec2 cupOff = (vUv - uCupCenter) / uCupRadiusUV;
   if (length(cupOff) > 1.0) {
@@ -20,7 +31,6 @@ void main () {
   float R = texture2D(uPressure, vR).x;
   float T = texture2D(uPressure, vT).x;
   float B = texture2D(uPressure, vB).x;
-  // Neumann boundary: outside neighbor takes the center cell's pressure
   if (length((vL - uCupCenter) / uCupRadiusUV) > 1.0) { L = C; }
   if (length((vR - uCupCenter) / uCupRadiusUV) > 1.0) { R = C; }
   if (length((vT - uCupCenter) / uCupRadiusUV) > 1.0) { T = C; }
