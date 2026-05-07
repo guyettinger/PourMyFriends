@@ -181,15 +181,15 @@ const config = {
 
   // Fluid tuning
   DENSITY_DISSIPATION: 0,
-  VELOCITY_DISSIPATION: 0.8,
+  VELOCITY_DISSIPATION: 0.98,
   PRESSURE: 1,
-  PRESSURE_ITERATIONS: 2,
+  PRESSURE_ITERATIONS: 20,
   CURL: 0,
 
   // Pour tuning
-  SPLAT_RADIUS: 6.0,
+  SPLAT_RADIUS: 4.0,
   SPLAT_FORCE: 200,
-  RADIAL_PUSH: 1.5,
+  RADIAL_PUSH: 0.25,
   FOAM_ABSORPTION: 1.0,
   /** Pitcher height: 0 = low (visible "draw"), 1 = high (invisible "fill"). */
   PITCHER_HEIGHT: 0.05,
@@ -278,10 +278,7 @@ export const RosettaScreen = () => {
 
   const insets = useSafeAreaInsets()
 
-  const cupParams = React.useMemo(
-    () => computeCupParams(SCREEN_WIDTH, SCREEN_HEIGHT),
-    [],
-  )
+  const cupParams = React.useMemo(() => computeCupParams(SCREEN_WIDTH, SCREEN_HEIGHT), [])
 
   /** Adjust a single setting by delta, clamped to [min, max]. Mutates config immediately. */
   const adjustSetting = (key: keyof SimSettings, delta: number, min: number, max: number) => {
@@ -1024,7 +1021,7 @@ function onContextCreate(
       const flowRate = 1.0 //+ Math.min(0.5, s.elapsedTime * 0.1)
       const pressureScale = 0.7 + 0.3 * s.pressure
       const radiusPct = config.SPLAT_RADIUS / (flowRate * pressureScale)
-      const radialForce = config.RADIAL_PUSH / (flowRate * pressureScale) * s.weight
+      const radialForce = (config.RADIAL_PUSH / (flowRate * pressureScale)) * s.weight
       splat({
         x: s.x,
         y: s.y,
