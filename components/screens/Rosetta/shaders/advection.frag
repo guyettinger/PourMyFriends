@@ -1,13 +1,19 @@
-// advection.frag — Semi-Lagrangian advection of uSource by uVelocity.
-// Reads:  uVelocity (sim grid), uSource (sim or dye grid), uVelTexelSize,
-//         uDyeTexelSize (only used by MANUAL_FILTERING bilerp), uDt,
-//         uDissipation, cup uniforms.
-// Writes: advected field, divided by (1 + uDissipation*uDt) for decay.
-// Math:   coord = vUv − uDt * vel(vUv) * uVelTexelSize.
-//         uVelTexelSize is the velocity grid's 1/dim — bound from JS, NOT
-//         the target FBO's texel size — so dye and velocity advection trace
-//         the same UV distance for the same velocity value.
-//         Trajectories that leave the cup are clamped to the cup wall.
+// advection.frag — Move a field along the velocity field by one time step.
+// For each output cell we ask: "where was this stuff one step ago?" and
+// fetch whatever was there. Used both to carry milk along the flow and to
+// carry the velocity field along itself.
+//
+// Reads:  uVelocity (sim grid), uSource (the field being moved — velocity
+//         or dye), uVelTexelSize, uDyeTexelSize (only used by the manual
+//         bilinear fallback), uDt, uDissipation, cup uniforms.
+// Writes: the moved field, optionally faded by uDissipation.
+// Note:   uVelTexelSize is always the velocity grid (set from JS). That way
+//         the same velocity value traces the same UV distance whether we're
+//         moving the small velocity grid or the bigger dye grid.
+// Note:   #ifdef MANUAL_FILTERING is the fallback for hardware that doesn't
+//         support hardware bilinear filtering on float textures (rare today).
+// Cup walls: trajectories that leave the cup are pulled back to the rim,
+// so dye can't smear into the saucer.
 
 precision highp float;
 precision highp sampler2D;

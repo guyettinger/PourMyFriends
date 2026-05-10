@@ -1,16 +1,24 @@
-// display.frag — Final composite: cup background + ceramic rim + espresso/crema
-// surface + advected milk dye with Beer-Lambert opacity, valley shading,
-// directional lighting, and warm specular highlight.
-// Reads:  uTexture (dye RG = milk visibility, crema density), color uniforms,
-//         shaping params (uMaskHarden, uFoamAbsorption, uMilkOpacity, etc.),
-//         uDyeTexelSize (NOT the display target's texel size — see below),
+// display.frag — The final pass that paints what you see on screen.
+// Layered from back to front:
+//   1. Cup background (the dark saucer outside the rim).
+//   2. The ceramic rim itself — a beveled ring lit from the upper-left.
+//   3. The coffee surface — espresso, optionally tinted with crema.
+//   4. The milk on top — softened by a tent blur, with a thin "valley"
+//      darkening where the milk gets thin (this is what defines the
+//      petals of the rosetta), warm rim shading at the milk's edge,
+//      a directional light, and a tight specular pop on the highlights.
+//
+// Reads:  uTexture (the dye buffer — R = milk visibility, G = crema density),
+//         color uniforms (espresso, milk, rim, etc.), shaping params
+//         (uMaskHarden, uFoamAbsorption, uMilkOpacity, …), uDyeTexelSize,
 //         cup geometry, uAspect.
-// Writes: composited RGB.
-// Note:   We resample neighbors locally with uDyeTexelSize because the
-//         shared base.vert varyings vL/vR/vT/vB are bound to the display
-//         target's texel size (much finer than the dye grid), which would
-//         resolve as bilinear-interpolated streaks instead of true dye-cell
-//         differences for the Laplacian / tent kernel / gradient.
+// Writes: final RGB.
+// Note:   We sample neighbors with uDyeTexelSize rather than using the
+//         vL/vR/vT/vB varyings from base.vert. Those varyings are sized
+//         to the screen target (way smaller than the dye texel), so they
+//         would step within a single dye cell — the Laplacian would
+//         dissolve into bilinear-interpolated streaks instead of catching
+//         the real differences between dye cells.
 
 precision highp float;
 precision highp sampler2D;

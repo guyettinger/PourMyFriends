@@ -1,7 +1,12 @@
-// base.vert — Shared fullscreen-quad vertex shader for every fragment pass.
-// Reads:  aPosition (clip-space quad corners), uTexelSize (1 / target dims).
-// Writes: vUv (UV in [0,1]), vL/vR/vT/vB (neighbor UV offsets for stencils).
-// Math:   vUv = aPosition*0.5 + 0.5; neighbor UVs = vUv ± uTexelSize basis.
+// base.vert — The vertex shader every fragment pass uses.
+// All it does is paint a fullscreen rectangle and pre-compute the UV
+// coordinates of the four neighbor cells (left/right/top/bottom). Fragment
+// shaders that do central-difference math on a grid (curl, divergence,
+// pressure, etc.) read those neighbor UVs straight out of the varyings
+// instead of recomputing them per pixel.
+//
+// Reads:  aPosition (the rectangle's corners), uTexelSize (1 / target size).
+// Writes: vUv (the cell's UV), vL/vR/vT/vB (its neighbors' UVs).
 
 precision highp float;
 

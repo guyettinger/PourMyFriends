@@ -1,7 +1,12 @@
-// curl.frag — Compute scalar 2D vorticity ω from the velocity field.
-// Reads:  uVelocity (RG), neighbor UVs (vL/vR/vT/vB), uCupCenter, uCupRadiusUV.
-// Writes: ω in R channel.
-// Math:   ω = ∂v/∂x − ∂u/∂y, central-differenced: 0.5 * ((vR.y − vL.y) − (vT.x − vB.x)).
+// curl.frag — Measure how much the fluid is rotating at every cell.
+// At each pixel we look at the velocity in our four neighbors and ask:
+// is this a clockwise swirl, a counter-clockwise swirl, or a straight flow?
+// The answer (a single signed number called "vorticity") feeds vorticity.frag,
+// which uses it to keep swirls from melting away over time.
+//
+// Reads:  uVelocity (RG), neighbor UVs from base.vert, cup uniforms.
+// Writes: signed vorticity in R.
+// Math:   ω = ∂v/∂x − ∂u/∂y, via central differences.
 
 precision highp float;
 precision highp sampler2D;

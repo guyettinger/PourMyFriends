@@ -1,12 +1,16 @@
-// divergence.frag — Compute ∇·u of the velocity field for the pressure solve.
-// Reads:  uVelocity, neighbor UVs, uCupCenter, uCupRadiusUV.
-// Writes: divergence in R channel.
-// Math:   ∇·u = 0.5 * ((u_R − u_L) + (v_T − v_B)). The 0.5 is the canonical
-//         central-difference scaling; gradient.frag intentionally omits its
-//         matching 0.5 — the projection still produces a divergence-free
-//         field because pressure absorbs the constant factor.
-//         At cup walls (rect or circular) ghost cells reflect the normal
-//         velocity component (no-slip Neumann) so flow doesn't escape.
+// divergence.frag — How much fluid each cell is gaining or losing.
+// In real life that number should be zero everywhere (you can't compress
+// milk). When it's not, the next few passes (pressure + gradient subtract)
+// nudge the velocity field until it is. This shader just measures the
+// imbalance — it doesn't fix it yet.
+//
+// Reads:  uVelocity, neighbor UVs, cup uniforms.
+// Writes: divergence in R.
+// Math:   ∇·u = 0.5 * ((u_R − u_L) + (v_T − v_B)). The 0.5 here pairs with
+//         a missing 0.5 in gradient.frag — the constant cancels out, so
+//         the projection still produces a divergence-free field.
+// Cup walls: the velocity component pointing into the wall is reflected,
+// so the flow can't escape the cup.
 
 precision highp float;
 precision highp sampler2D;

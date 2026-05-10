@@ -1,5 +1,8 @@
-// scale.frag — Scalar multiply pass; used as the per-step velocity dissipation
-// reset on the pressure field. (Was historically misnamed "clear.frag".)
+// scale.frag — Multiply every pixel of a texture by a constant.
+// In this pipeline we use it once per step to fade the previous frame's
+// pressure field by `config.PRESSURE` before the new pressure solve begins
+// — a "warm start" that gives the iterative solver a head start without
+// fully resetting it.
 // Reads:  uSource (texture to scale), uValue (scalar multiplier).
 // Writes: uValue * uSource sampled at vUv.
 

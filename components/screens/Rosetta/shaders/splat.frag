@@ -1,10 +1,18 @@
-// splat.frag — Inject a Gaussian splat into velocity OR dye field.
-// Reads:  uTarget (current field), uPoint, uColor, uRadius, uAspectRatio,
-//         uMaskMode (0=velocity / 1=dye), uRadialMode (0=directional / 1=radial),
-//         uHeightFactor (pitcher height 0..1), uPourDir, uCupCenter, uCupRadiusUV.
-// Writes: velocity (RG) or dye (R=milk visibility, G=crema density).
-// Math:   Anisotropic Gaussian; for radial mode, perpendicular axis spreads wider
-//         (lateral fan-out); for dye mode, uses Beer-Lambert-style accumulation.
+// splat.frag — Stamp a soft blob into either the velocity or dye buffer.
+// One pass through this shader is one "drop" of the pour: the JS layer calls
+// it three times per touch sample — once for radial fan-out, once for the
+// directional stream, once to lay down the milk on the dye buffer.
+//
+// Reads:  uTarget (current field), uPoint (UV center), uColor (carries the
+//         payload — dx/dy for velocity, milk strength for dye), uRadius,
+//         uAspectRatio, uMaskMode (0 = velocity write / 1 = dye write),
+//         uRadialMode (0 = circular kernel / 1 = anisotropic fan), uHeightFactor
+//         (pitcher height 0..1), uPourDir, cup uniforms.
+// Writes: velocity (RG) or dye (R = milk visibility, G = crema density).
+// Note:   In radial mode the kernel stretches sideways across the pour axis,
+//         giving a lateral fan rather than a perfect circle. The dye blend
+//         is `max()` for milk and a soft subtract for crema (true
+//         absorption-style blending happens later, in display.frag).
 
 precision highp float;
 precision highp sampler2D;

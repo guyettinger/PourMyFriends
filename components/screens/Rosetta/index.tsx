@@ -29,17 +29,21 @@ import {
 } from './shaders'
 
 /**
- * Latte Art Rosetta Simulator (Expo + WebGL)
+ * Latte Art Rosetta Simulator (Expo + WebGL).
  *
- * Simulates a 2D fluid field (velocity/pressure) and a dye buffer representing frothed milk.
- * The user pours by touching/dragging; velocity and a milk mask are injected via Gaussian splats.
- * A display shader composites milk over espresso, revealing espresso in "valleys" (thin milk)
- * with subtle lighting and crema noise.
+ * The user pours milk into a coffee cup by touching and dragging. Under the hood,
+ * a small fluid simulation runs on the GPU: each touch stamps a soft blob of
+ * "velocity" (the push of the stream) and "dye" (the milk itself) into floating-point
+ * textures, and the simulation moves the dye around using those velocities every
+ * frame. A final shader paints the result — espresso underneath, milk on top,
+ * with shading that picks out the petals and ridges of the latte art.
  *
- * Pipeline:
- * 1. Velocity update: curl -> vorticity confinement -> divergence -> pressure solve -> gradient subtract -> advection.
- * 2. Dye (milk) advection by the velocity field; dye has zero dissipation (milk persists).
- * 3. Display: tent-filter the milk mask, estimate valleys via Laplacian, thin milk in valleys, add specular and crema.
+ * What happens each frame:
+ * 1. Update the flow: stir up swirls, force the field to be incompressible
+ *    (so milk can't pile up in one spot), then carry the velocity along itself.
+ * 2. Carry the milk along the flow. Milk doesn't fade — once poured, it stays.
+ * 3. Composite the cup: a soft glow on the milk, "valleys" where it thins out,
+ *    a sprinkle of crema texture, and the ceramic rim.
  */
 
 const SCREEN_WIDTH = Dimensions.get('screen').width
@@ -255,9 +259,6 @@ const config = {
 
   // Pour tuning
   SPLAT_RADIUS: 4.0,
-  // Halved (was 200) when advection.frag's trace switched from the dye-grid
-  // texelSize to the velocity-grid uVelTexelSize — same touch motion now produces
-  // ~2× the dye displacement, so the velocity injection is scaled down to match.
   SPLAT_FORCE: 100,
   RADIAL_PUSH: 0.25,
   FOAM_ABSORPTION: 1.0,
@@ -429,7 +430,7 @@ export const RosettaScreen = () => {
     return r <= 1.0 - cupParams.rimThicknessFrac
   }
 
-  /** Memoized PanResponder; reads config inline so it tracks live setting changes. */
+  /** Created once and kept across re-renders. The handlers read `config` inline so slider tweaks take effect on the next touch — no need to rebuild the responder. */
   const panResponderRef = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
@@ -453,8 +454,8 @@ export const RosettaScreen = () => {
         const newX = evt.nativeEvent.locationX / SCREEN_WIDTH
         const newY = 1.0 - evt.nativeEvent.locationY / SCREEN_HEIGHT
         if (!isInsideCup(newX, newY)) {
-          // Drag is outside the cup — suppress splat injection, but keep the touch alive
-          // so re-entering the cup resumes pouring without requiring lift+touch.
+          // The drag has wandered off the rim. Stop pouring, but keep the touch
+          // active — sliding back over the cup picks the pour right back up.
           return
         }
         const p = getTouchPressure(evt)
@@ -465,18 +466,21 @@ export const RosettaScreen = () => {
         const ddy = newY - prev.y
         const dist = Math.sqrt(ddx * ddx + ddy * ddy)
 
-        // Constant pour velocity — faithful to pitcher tilt (not drag speed).
-        // Lateral motion spreads the same flow over more area via sub-splat interpolation below.
+        // The pour speed is fixed — like a real pitcher, the stream's strength
+        // depends on how you tilt it, not how fast your hand moves. A faster
+        // sweep just spreads the same flow over more area (handled by the
+        // per-stamp weighting below).
         const baseVel = config.SPLAT_FORCE / 25
         const vx = dist > 0 ? (ddx / dist) * baseVel * p : 0
         const vy = dist > 0 ? (ddy / dist) * baseVel * p : -baseVel * p
 
-        // Interpolate along the drag path. Uncap step count — fast swipes must still fill the stream.
+        // Drop a stamp every ~0.012 UV units along the drag path so the stream
+        // looks continuous even on fast swipes (no upper cap on stamp count).
         const step = 0.012
         const steps = Math.max(1, Math.ceil(dist / step))
         const elapsedTime = (Date.now() - pourStartTimeRef.current) / 1000
-        // Per-stamp share of the move's total flow — keeps total injected momentum
-        // per frame constant regardless of sweep speed.
+        // Each stamp carries 1/N of this stroke's total flow, so a slow scribble
+        // and a fast swipe deposit the same amount of milk per frame.
         const weight = 1 / steps
 
         for (let i = 1; i <= steps; i++) {
@@ -493,7 +497,8 @@ export const RosettaScreen = () => {
           })
         }
 
-        // Cap the queue so a stalled frame can't cause a lag spike when it resumes.
+        // Cap the backlog. If a frame stalls and a flurry of touches piles up,
+        // we'd rather drop the oldest than hammer the GPU all at once.
         if (splatStackRef.current.length > 32) {
           splatStackRef.current.splice(0, splatStackRef.current.length - 32)
         }
@@ -509,7 +514,7 @@ export const RosettaScreen = () => {
     }),
   )
 
-  // Stop interval and cancel RAF loop on unmount
+  // Stop the drip timer and the render loop when the screen goes away.
   useEffect(() => {
     return () => {
       stopContinuousPouring()
@@ -543,7 +548,8 @@ export const RosettaScreen = () => {
         {...panResponderRef.current.panHandlers}
       />
 
-      {/* HUD overlay — box-none passes touches through to GLView */}
+      {/* The top bar floats above the cup. `box-none` lets touches pass through
+          the empty parts of this overlay down to the canvas. */}
       <View
         pointerEvents="box-none"
         style={{
@@ -822,9 +828,9 @@ function onContextCreate(
     return uniforms
   }
 
-  // Tracks the currently-bound GLProgram. Maintained by bind() so blit() can
-  // push texelSize into the active program without round-tripping through
-  // gl.getParameter / gl.getUniformLocation (both are sync-points on mobile GLES).
+  // We track the active program ourselves so `blit()` can update its
+  // `uTexelSize` without asking WebGL which program is bound. Querying GL
+  // state forces a CPU-GPU sync — slow on mobile, costly per frame.
   let currentGLProgram: GLProgram | null = null
 
   /**
@@ -845,7 +851,6 @@ function onContextCreate(
     return result
   }
 
-  // Compile all shaders
   const baseVertex = compileShader({ type: gl.VERTEX_SHADER, source: baseVertexShader, keywords: ['baseVertex'] })
   const splatFrag = compileShader({ type: gl.FRAGMENT_SHADER, source: splatShader, keywords: ['splatFrag'] })
   const displayFrag = compileShader({ type: gl.FRAGMENT_SHADER, source: displayShader, keywords: ['displayFrag'] })
@@ -966,7 +971,9 @@ function onContextCreate(
   let curl: FBO
   let divergence: FBO
   let pressure: DoubleFBO
-  // MacCormack scratch buffers — phi_hat (forward-advected) and phi_bar (round-trip).
+  // Scratch buffers for the MacCormack advection step. `Hat` holds the
+  // field traced one step forward; `Bar` holds the round-trip back. Both
+  // exist for velocity and for dye.
   let velHat: FBO
   let velBar: FBO
   let dyeHat: FBO
@@ -1017,8 +1024,9 @@ function onContextCreate(
     if (dyeHat == null) dyeHat = dyeFBO(rgba, filtering)
     if (dyeBar == null) dyeBar = dyeFBO(rgba, filtering)
 
-    // Prime the cup with a full crema layer (g = 1.0). Both read/write buffers seeded
-    // so the first swap doesn't overwrite with a stale zeroed buffer.
+    // Pre-fill the cup with a full layer of crema (the green channel).
+    // We seed BOTH the read and write buffers — otherwise the first ping-pong
+    // swap would flip in an empty texture and the cup would briefly look bare.
     clearFBO({ target: dye.read, r: 0.0, g: 1.0, b: 0.0, a: 1.0 })
     clearFBO({ target: dye.write, r: 0.0, g: 1.0, b: 0.0, a: 1.0 })
   }
@@ -1026,8 +1034,9 @@ function onContextCreate(
   // --- Simulation ---
 
   /**
-   * Inject a splat into the velocity and dye fields.
-   * Three GPU passes: radial push (optional), directional velocity, milk mask deposit.
+   * Apply one stamp of the pour. Up to three GPU passes per stamp: an outward
+   * fan-out kick (optional), a directional momentum push along the pour, and
+   * the milk paint deposit into the dye buffer.
    */
   function splat(params: SplatParams) {
     const { x, y, dx, dy, color, radiusPct, radialForce, heightFactor } = params
@@ -1047,8 +1056,9 @@ function onContextCreate(
     const pourDirY = len > 0.0001 ? dy / len : -1.0
     gl.uniform2f(splatProgram.uniforms.uPourDir, pourDirX, pourDirY)
 
-    // Pass 1: radial outward displacement (oval kernel).
-    // High pitcher deposits less momentum — gentler stream.
+    // Pass 1 — the radial fan-out: when milk hits the surface it spreads
+    // sideways, away from the impact point. Holding the pitcher higher softens
+    // this kick (the stream loses energy on the way down).
     if (radialForce != null && radialForce > 0) {
       const scaledRadial = radialForce * (1.0 - 0.6 * h)
       gl.uniform3f(splatProgram.uniforms.uColor, scaledRadial, 0.0, 0.0)
@@ -1056,14 +1066,15 @@ function onContextCreate(
       gl.uniform1f(splatProgram.uniforms.uRadialMode, 1.0)
       blit(velocity.write)
       velocity.swap()
-      // Re-bind uTarget to the swapped-in velocity.read so Pass 2 doesn't
-      // sample the texture it's about to write to. WebGL2 strict mode (desktop
-      // Chrome) rejects that with "Feedback loop formed between Framebuffer
-      // and active Texture"; Android's GLES silently permitted it.
+      // After the swap, what we just wrote to is now `velocity.read`. We have
+      // to re-point `uTarget` at it before Pass 2, otherwise the GPU is
+      // sampling and writing the same texture in one draw — strict-mode WebGL
+      // (desktop Chrome) refuses with a "feedback loop" error.
       gl.uniform1i(splatProgram.uniforms.uTarget, velocity.read.attach(0))
     }
 
-    // Pass 2: directional stream momentum (also attenuated at high pitcher).
+    // Pass 2 — the directional stream: pushes the fluid in the direction of
+    // the pour itself. Also softer when the pitcher is high.
     const velScale = 1.0 - 0.6 * h
     gl.uniform3f(splatProgram.uniforms.uColor, dx * velScale, dy * velScale, 0.0)
     gl.uniform1f(splatProgram.uniforms.uRadius, radius)
@@ -1071,7 +1082,8 @@ function onContextCreate(
     blit(velocity.write)
     velocity.swap()
 
-    // Pass 3: dye deposit (milk mask in r, crema erosion in g — handled by shader).
+    // Pass 3 — paint actual milk into the dye buffer (R = milk visibility,
+    // G = crema being washed away by the stream).
     gl.uniform1i(splatProgram.uniforms.uTarget, dye.read.attach(0))
     gl.uniform3f(splatProgram.uniforms.uColor, color.r, color.g, color.b)
     gl.uniform1f(splatProgram.uniforms.uMaskMode, 1.0)
@@ -1079,7 +1091,7 @@ function onContextCreate(
     dye.swap()
   }
 
-  /** Drain pending splats from the queue, adaptively capped per frame for performance. */
+  /** Process queued touch stamps. The cap-per-frame keeps the GPU from drowning under a backlog from a stalled frame. */
   function applyInputs() {
     const queue = splatStackRef.current
     const maxSplatsPerFrame = Math.min(8, Math.max(2, Math.ceil(queue.length / 4)))
@@ -1105,7 +1117,7 @@ function onContextCreate(
     }
   }
 
-  /** Render the display shader: composites dye over espresso with lighting. */
+  /** Run the final composite: cup background, ceramic rim, espresso/crema underneath, milk on top with shading. */
   function drawDisplay(target: FBO | null) {
     displayProgram.bind()
     const u = displayProgram.uniforms
@@ -1177,7 +1189,11 @@ function onContextCreate(
     blit(dst)
   }
 
-  /** Execute one full simulation step: curl → vorticity → divergence → pressure → gradient → advection. */
+  /**
+   * Run one full fluid step. In order: measure swirl, amplify swirl,
+   * compute pressure, subtract pressure to keep flow incompressible,
+   * then carry both velocity and dye along the velocity field.
+   */
   function step(dt: number) {
     gl.disable(gl.BLEND)
 
@@ -1224,7 +1240,8 @@ function onContextCreate(
     blit(velocity.write)
     velocity.swap()
 
-    // Advect velocity (MacCormack: forward → backward → corrected/clamped combine).
+    // Carry the velocity field along itself ("self-advection"). MacCormack
+    // traces forward, traces back, and corrects — keeps the swirls crisp.
     advectMacCormack({
       source: velocity.read,
       dst: velocity.write,
@@ -1236,7 +1253,7 @@ function onContextCreate(
     })
     velocity.swap()
 
-    // Advect dye (milk + crema channels) — MacCormack.
+    // Carry the milk + crema channels along the (now updated) velocity field.
     advectMacCormack({
       source: dye.read,
       dst: dye.write,

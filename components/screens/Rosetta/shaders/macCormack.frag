@@ -1,13 +1,16 @@
-// macCormack.frag — MacCormack correction step (advection limiter).
-// Reads:  uField (φ⁰, original), uHat (φ̂, forward-advected), uBar (φ̄,
-//         round-trip), uVelocity, uVelTexelSize, uTexelSize (target/field
-//         grid — used for the limiter neighborhood), uDt, uDissipation,
-//         cup uniforms.
-// Writes: clamped, decayed corrected field.
-// Math:   φ_corrected = φ̂ + 0.5 * (φ⁰ − φ̄), then clamped to the
-//         min/max of the 4 corner samples around the back-traced coord.
-// Invariant: uTexelSize must equal the field's native grid (target == uField
-// grid in current pipeline). uVelTexelSize is the velocity grid for the trace.
+// macCormack.frag — Correction step that sits on top of basic advection.
+// Plain semi-Lagrangian advection (advection.frag) tends to smear detail
+// over time. The MacCormack scheme corrects for that smearing by using
+// three samples — the original field, a forward-traced version, and a
+// round-trip — to recover the lost sharpness. A clamp to neighboring
+// values keeps the correction from inventing brand-new oscillations.
+//
+// Reads:  uField (φ, original), uHat (φ̂, forward-traced), uBar (φ̄,
+//         round-trip), uVelocity, uVelTexelSize (velocity grid),
+//         uTexelSize (the field's own grid — used for the local clamp
+//         neighborhood), uDt, uDissipation, cup uniforms.
+// Writes: corrected and (optionally) faded field.
+// Math:   φ_new = clamp( φ̂ + 0.5 * (φ − φ̄),  min/max of 4 nearby cells ).
 
 precision highp float;
 precision highp sampler2D;

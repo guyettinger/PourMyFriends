@@ -1,11 +1,14 @@
-// gradient.frag — Subtract pressure gradient from velocity to enforce ∇·u = 0.
-// Reads:  uPressure, uVelocity, neighbors, cup uniforms.
+// gradient.frag — Final step of the pressure projection.
+// Take the pressure field that the solver just computed and use it to
+// "un-pile" the velocity: where pressure is high, fluid gets pushed
+// downhill until everything's incompressible. After this pass, the
+// velocity field is divergence-free and ready to be advected.
+//
+// Reads:  uPressure, uVelocity, neighbor UVs, cup uniforms.
 // Writes: corrected velocity (RG).
-// Math:   u_new = u − ∇p, with ∇p = (p_R − p_L, p_T − p_B). The 2× scale
-//         vs. the canonical central-difference is intentional: divergence.frag
-//         carries the matching 0.5; the constant factor lives in pressure and
-//         the projection is still mathematically correct.
-//         Cup wall: Neumann (ghost = center) — same as pressure.frag.
+// Math:   u_new = u − ∇p. The 2× factor (vs. the textbook central
+//         difference) cancels with the 0.5 in divergence.frag.
+// Cup walls: same Neumann boundary as pressure.frag.
 
 precision highp float;
 precision highp sampler2D;

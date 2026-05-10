@@ -1,9 +1,15 @@
-// pressure.frag — One Jacobi iteration of the pressure Poisson solve.
-// Reads:  uPressure (previous iterate), uDivergence, neighbors, cup uniforms.
-// Writes: updated pressure in R channel.
-// Math:   p_new = (p_L + p_R + p_T + p_B − div) / 4 with grid spacing h=1.
-//         Cup wall: Neumann boundary (∂p/∂n = 0) — ghost cell pressure copies
-//         the center value so the gradient at the wall is zero.
+// pressure.frag — One step of the iterative pressure solve.
+// Pressure is what tells the fluid "you can't pile up here, push outward."
+// We don't solve for it in one shot; instead the JS layer runs this shader
+// many times in a row (config.PRESSURE_ITERATIONS), and each pass nudges
+// the pressure field a little closer to the right answer.
+//
+// Reads:  uPressure (last guess), uDivergence (from divergence.frag),
+//         neighbor UVs, cup uniforms.
+// Writes: refined pressure in R.
+// Math:   p_new = (p_L + p_R + p_T + p_B − div) / 4   (Jacobi iteration).
+// Cup walls: pressure has no gradient at the rim — the ghost cell just
+// copies the center, so the fluid neither sucks nor pushes through the wall.
 
 precision highp float;
 precision highp sampler2D;

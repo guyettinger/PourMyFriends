@@ -1,8 +1,11 @@
-// vorticity.frag — Apply vorticity-confinement force to the velocity field.
-// Reads:  uVelocity, uCurl, uCurlStrength (ε), uDt, uCupCenter, uCupRadiusUV.
-// Writes: velocity (RG) += ε * (∇|ω| × ẑ) * dt.
-// Math:   force = ε * ω * normalize((∂|ω|/∂y, −∂|ω|/∂x)); the y-flip on the
-//         second component gives the 2D curl-cross-z direction.
+// vorticity.frag — "Vorticity confinement": find existing swirls and give
+// them a nudge in the direction they're already turning. Coarse-grid fluid
+// sims tend to lose detail to numerical smoothing; this pass puts the
+// swirly motion back, giving the milk that lively, latte-art look.
+//
+// Reads:  uVelocity, uCurl (output of curl.frag), uCurlStrength (ε), uDt,
+//         cup uniforms.
+// Writes: velocity (RG), pushed along the curl-cross-z direction by ε * ω.
 
 precision highp float;
 precision highp sampler2D;
