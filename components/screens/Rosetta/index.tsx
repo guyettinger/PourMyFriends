@@ -9,6 +9,7 @@ import {
   ScrollView,
   Platform,
 } from 'react-native'
+import type { GestureResponderEvent, ViewStyle } from 'react-native'
 import { GLView } from 'expo-gl'
 import { router } from 'expo-router'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
@@ -167,6 +168,72 @@ interface GLProgram {
   bind: () => void
 }
 
+/** Parameters for compiling a single shader. */
+interface CompileShaderParams {
+  /** WebGL shader type (gl.VERTEX_SHADER or gl.FRAGMENT_SHADER). */
+  type: number
+  /** GLSL source code. */
+  source: string
+  /** Optional preprocessor `#define` keywords prepended to the source. */
+  keywords: string[] | null
+}
+
+/** Parameters for probing whether a texture/internal-format combination is renderable. */
+interface FormatProbeParams {
+  /** WebGL or WebGL2 rendering context. */
+  gl: WebGLRenderingContext
+  /** Texture internal format (e.g. gl.RGBA, gl2.RGBA16F). */
+  internalFormat: number
+  /** Texture pixel format (e.g. gl.RGBA, gl2.RG). */
+  format: number
+  /** Pixel data type (e.g. gl.UNSIGNED_BYTE, halfFloat). */
+  type: number
+}
+
+/** Parameters for clearing a single FBO to a solid RGBA color. */
+interface ClearFBOParams {
+  /** Target framebuffer. */
+  target: FBO
+  /** Red channel 0..1. */
+  r: number
+  /** Green channel 0..1. */
+  g: number
+  /** Blue channel 0..1. */
+  b: number
+  /** Alpha channel 0..1. */
+  a: number
+}
+
+/** Parameters for adjusting one sim setting via the settings UI. */
+interface AdjustSettingParams {
+  /** Setting key on SimSettings. */
+  key: keyof SimSettings
+  /** Signed change to apply to the current value. */
+  delta: number
+  /** Minimum allowed value (inclusive). */
+  min: number
+  /** Maximum allowed value (inclusive). */
+  max: number
+}
+
+/** Parameters for one MacCormack advection of a single field (forward → backward → combine). */
+interface AdvectMacCormackParams {
+  /** Field at time n (sampled by the corrector). */
+  source: FBO
+  /** Where the corrected field is written. */
+  dst: FBO
+  /** Scratch for forward-advected phi_hat. */
+  hat: FBO
+  /** Scratch for round-trip phi_bar. */
+  bar: FBO
+  /** Per-axis (1/w, 1/h) of the destination grid; used as the manual-filter fallback texel. */
+  dstTexelSize: [number, number]
+  /** Dissipation factor passed to the combine pass. */
+  dissipation: number
+  /** Simulation dt. */
+  dt: number
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -260,6 +327,25 @@ const DEFAULT_SETTINGS: SimSettings = Object.fromEntries(
   SETTING_DEFS.map(({ key }) => [key, config[key as keyof typeof config] as number]),
 ) as SimSettings
 
+/** Style for the +/- stepper buttons in the settings modal. Hoisted to avoid per-render re-allocation. */
+const STEPPER_BUTTON_STYLE: ViewStyle = {
+  width: 36,
+  height: 36,
+  borderRadius: 8,
+  backgroundColor: 'rgba(255,255,255,0.1)',
+  alignItems: 'center',
+  justifyContent: 'center',
+}
+
+/**
+ * Read normalized 3D-touch pressure from a `GestureResponderEvent`, clamped to `[0.1, 1.0]`.
+ * Falls back to `1.0` when `force` is missing or zero (devices without 3D Touch report no force).
+ */
+const getTouchPressure = (evt: GestureResponderEvent): number => {
+  const force = (evt.nativeEvent as unknown as { force?: number }).force || 1.0
+  return Math.max(0.1, Math.min(1.0, force))
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -283,8 +369,9 @@ export const RosettaScreen = () => {
 
   const cupParams = React.useMemo(() => computeCupParams(SCREEN_WIDTH, SCREEN_HEIGHT), [])
 
-  /** Adjust a single setting by delta, clamped to [min, max]. Mutates config immediately. */
-  const adjustSetting = (key: keyof SimSettings, delta: number, min: number, max: number) => {
+  /** Adjust a single setting by `delta`, clamped to `[min, max]`. Mutates `config` immediately. */
+  const adjustSetting = (params: AdjustSettingParams) => {
+    const { key, delta, min, max } = params
     setSettings((prev) => {
       const next = Math.round((prev[key] + delta) * 1000) / 1000
       const clamped = Math.max(min, Math.min(max, next))
@@ -355,8 +442,7 @@ export const RosettaScreen = () => {
         if (!isInsideCup(x, y)) return
         touchingRef.current = true
         lastTouchRef.current = { x, y }
-        const pressure = (evt.nativeEvent as unknown as { force?: number }).force || 1.0
-        touchPressureRef.current = Math.max(0.1, Math.min(1.0, pressure))
+        touchPressureRef.current = getTouchPressure(evt)
         pourStartTimeRef.current = Date.now()
         startContinuousPouring()
       },
@@ -371,8 +457,7 @@ export const RosettaScreen = () => {
           // so re-entering the cup resumes pouring without requiring lift+touch.
           return
         }
-        const pressure = (evt.nativeEvent as unknown as { force?: number }).force || 1.0
-        const p = Math.max(0.1, Math.min(1.0, pressure))
+        const p = getTouchPressure(evt)
         touchPressureRef.current = p
 
         const prev = { ...lastTouchRef.current }
@@ -434,15 +519,6 @@ export const RosettaScreen = () => {
       }
     }
   }, [])
-
-  const stepperBtnStyle = {
-    width: 36,
-    height: 36,
-    borderRadius: 8,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    alignItems: 'center' as const,
-    justifyContent: 'center' as const,
-  }
 
   return (
     <View
@@ -542,13 +618,19 @@ export const RosettaScreen = () => {
                   }}
                 >
                   <RNText style={{ flex: 1, color: rgbToCss(config.HUD_LABEL_COLOR), fontSize: 15 }}>{label}</RNText>
-                  <TouchableOpacity onPress={() => adjustSetting(key, -step, min, max)} style={stepperBtnStyle}>
+                  <TouchableOpacity
+                    onPress={() => adjustSetting({ key, delta: -step, min, max })}
+                    style={STEPPER_BUTTON_STYLE}
+                  >
                     <RNText style={{ color: 'white', fontSize: 20, lineHeight: 24 }}>−</RNText>
                   </TouchableOpacity>
                   <RNText style={{ color: 'white', fontSize: 15, width: 56, textAlign: 'center' }}>
                     {settings[key].toFixed(decimals)}
                   </RNText>
-                  <TouchableOpacity onPress={() => adjustSetting(key, step, min, max)} style={stepperBtnStyle}>
+                  <TouchableOpacity
+                    onPress={() => adjustSetting({ key, delta: step, min, max })}
+                    style={STEPPER_BUTTON_STYLE}
+                  >
                     <RNText style={{ color: 'white', fontSize: 20, lineHeight: 24 }}>+</RNText>
                   </TouchableOpacity>
                 </View>
@@ -592,6 +674,7 @@ function onContextCreate(
 ) {
   // --- WebGL capability detection ---
 
+  /** Detect WebGL/WebGL2 capabilities and return supported texture formats. */
   function getWebGLContext(glCtx: WebGLRenderingContext): { gl: WebGLRenderingContext; ext: GLExtensions } {
     const isWebGL2 = typeof WebGL2RenderingContext !== 'undefined' && glCtx instanceof WebGL2RenderingContext
     let halfFloat: { HALF_FLOAT_OES: number } | null
@@ -611,13 +694,13 @@ function onContextCreate(
     let formatR: TextureFormat | null
     if (isWebGL2) {
       const gl2 = glCtx as unknown as WebGL2RenderingContext
-      formatRGBA = getSupportedFormat(glCtx, gl2.RGBA16F, glCtx.RGBA, halfFloatTexType)
-      formatRG = getSupportedFormat(glCtx, gl2.RG16F, gl2.RG, halfFloatTexType)
-      formatR = getSupportedFormat(glCtx, gl2.R16F, gl2.RED, halfFloatTexType)
+      formatRGBA = getSupportedFormat({ gl: glCtx, internalFormat: gl2.RGBA16F, format: glCtx.RGBA, type: halfFloatTexType })
+      formatRG = getSupportedFormat({ gl: glCtx, internalFormat: gl2.RG16F, format: gl2.RG, type: halfFloatTexType })
+      formatR = getSupportedFormat({ gl: glCtx, internalFormat: gl2.R16F, format: gl2.RED, type: halfFloatTexType })
     } else {
-      formatRGBA = getSupportedFormat(glCtx, glCtx.RGBA, glCtx.RGBA, halfFloatTexType)
-      formatRG = getSupportedFormat(glCtx, glCtx.RGBA, glCtx.RGBA, halfFloatTexType)
-      formatR = getSupportedFormat(glCtx, glCtx.RGBA, glCtx.RGBA, halfFloatTexType)
+      formatRGBA = getSupportedFormat({ gl: glCtx, internalFormat: glCtx.RGBA, format: glCtx.RGBA, type: halfFloatTexType })
+      formatRG = getSupportedFormat({ gl: glCtx, internalFormat: glCtx.RGBA, format: glCtx.RGBA, type: halfFloatTexType })
+      formatR = getSupportedFormat({ gl: glCtx, internalFormat: glCtx.RGBA, format: glCtx.RGBA, type: halfFloatTexType })
     }
     return {
       gl: glCtx,
@@ -625,19 +708,19 @@ function onContextCreate(
     }
   }
 
-  function getSupportedFormat(
-    glCtx: WebGLRenderingContext,
-    internalFormat: number,
-    format: number,
-    type: number,
-  ): TextureFormat | null {
-    if (!supportRenderTextureFormat(glCtx, internalFormat, format, type)) {
+  /**
+   * Probe the given internal/pixel format pair for renderability, recursively falling back to
+   * wider formats (R16F → RG16F → RGBA16F) if necessary. Returns null if no fallback succeeds.
+   */
+  function getSupportedFormat(params: FormatProbeParams): TextureFormat | null {
+    const { gl: glCtx, internalFormat, format, type } = params
+    if (!supportRenderTextureFormat(params)) {
       const gl2 = glCtx as unknown as WebGL2RenderingContext
       switch (internalFormat) {
         case gl2.R16F:
-          return getSupportedFormat(glCtx, gl2.RG16F, gl2.RG, type)
+          return getSupportedFormat({ gl: glCtx, internalFormat: gl2.RG16F, format: gl2.RG, type })
         case gl2.RG16F:
-          return getSupportedFormat(glCtx, gl2.RGBA16F, glCtx.RGBA, type)
+          return getSupportedFormat({ gl: glCtx, internalFormat: gl2.RGBA16F, format: glCtx.RGBA, type })
         default:
           return null
       }
@@ -645,12 +728,13 @@ function onContextCreate(
     return { internalFormat, format }
   }
 
-  function supportRenderTextureFormat(
-    glCtx: WebGLRenderingContext,
-    internalFormat: number,
-    format: number,
-    type: number,
-  ): boolean {
+  /**
+   * Check whether the given internal/pixel format pair is render-target-complete on this GPU.
+   * Allocates a 4×4 probe texture and framebuffer; both are deleted before returning so the
+   * probe never leaks GL resources, regardless of the result.
+   */
+  function supportRenderTextureFormat(params: FormatProbeParams): boolean {
+    const { gl: glCtx, internalFormat, format, type } = params
     const texture = glCtx.createTexture()
     glCtx.bindTexture(glCtx.TEXTURE_2D, texture)
     glCtx.texParameteri(glCtx.TEXTURE_2D, glCtx.TEXTURE_MIN_FILTER, glCtx.NEAREST)
@@ -662,9 +746,14 @@ function onContextCreate(
     glCtx.bindFramebuffer(glCtx.FRAMEBUFFER, fbo)
     glCtx.framebufferTexture2D(glCtx.FRAMEBUFFER, glCtx.COLOR_ATTACHMENT0, glCtx.TEXTURE_2D, texture, 0)
     const status = glCtx.checkFramebufferStatus(glCtx.FRAMEBUFFER)
+    glCtx.bindFramebuffer(glCtx.FRAMEBUFFER, null)
+    glCtx.bindTexture(glCtx.TEXTURE_2D, null)
+    glCtx.deleteFramebuffer(fbo)
+    glCtx.deleteTexture(texture)
     return status === glCtx.FRAMEBUFFER_COMPLETE
   }
 
+  /** Resolve a target sim resolution into pixel dimensions matching the drawing buffer's aspect ratio. */
   function getResolution(resolution: number): { width: number; height: number } {
     let aspectRatio = gl.drawingBufferWidth / gl.drawingBufferHeight
     if (aspectRatio < 1) aspectRatio = 1.0 / aspectRatio
@@ -678,29 +767,51 @@ function onContextCreate(
 
   const cupParams = computeCupParams(gl.drawingBufferWidth, gl.drawingBufferHeight)
 
+  /** Push the cup geometry uniforms (`uCupCenter`, `uCupRadiusUV`) into the currently bound program. */
+  const setCupUniforms = (program: GLProgram) => {
+    gl.uniform2f(program.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
+    gl.uniform2f(program.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
+  }
+
+  /** Push an RGBColor into a `vec3` uniform. WebGL silently ignores a null location. */
+  const setColorUniform = (loc: WebGLUniformLocation | null, c: RGBColor) => {
+    gl.uniform3f(loc, c.r, c.g, c.b)
+  }
+
   // --- Shader compilation ---
 
-  function compileShader(type: number, source: string, keywords: string[] | null): WebGLShader {
-    if (keywords != null) {
-      source = keywords.map((k) => '#define ' + k + '\n').join('') + source
-    }
+  /**
+   * Compile a single GLSL shader. The keywords (if any) are emitted as `#define`s above the source.
+   * Throws with the GLSL info log on compile failure so a broken pipeline never silently renders garbage.
+   */
+  function compileShader(params: CompileShaderParams): WebGLShader {
+    const { type, keywords } = params
+    const source = keywords != null ? keywords.map((k) => '#define ' + k + '\n').join('') + params.source : params.source
     const shader = gl.createShader(type)!
     gl.shaderSource(shader, source)
     gl.compileShader(shader)
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) console.trace(gl.getShaderInfoLog(shader))
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      const log = gl.getShaderInfoLog(shader) ?? '(no info log)'
+      throw new Error(`Shader compile failed (keywords=${keywords?.join(',') ?? 'none'}):\n${log}`)
+    }
     return shader
   }
 
+  /** Link a vertex+fragment shader pair into a program; throws with the program info log on failure. */
   function createProgram(vertexShader: WebGLShader, fragmentShader: WebGLShader): WebGLProgram {
     const program = gl.createProgram()!
     gl.attachShader(program, vertexShader)
     gl.attachShader(program, fragmentShader)
     gl.bindAttribLocation(program, 0, 'aPosition')
     gl.linkProgram(program)
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) console.trace(gl.getProgramInfoLog(program))
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      const log = gl.getProgramInfoLog(program) ?? '(no info log)'
+      throw new Error(`Program link failed:\n${log}`)
+    }
     return program
   }
 
+  /** Enumerate active uniforms on a linked program and return a name → location map. */
   function getUniforms(program: WebGLProgram): Record<string, WebGLUniformLocation | null> {
     const uniforms: Record<string, WebGLUniformLocation | null> = {}
     const uniformCount = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS)
@@ -716,6 +827,10 @@ function onContextCreate(
   // gl.getParameter / gl.getUniformLocation (both are sync-points on mobile GLES).
   let currentGLProgram: GLProgram | null = null
 
+  /**
+   * Compile, link, and wrap a shader pair into a `GLProgram`. Calling `bind()` activates the
+   * program and updates `currentGLProgram` so `blit` can push the per-target `uTexelSize` uniform.
+   */
   function makeProgram(vertexShader: WebGLShader, fragmentShader: WebGLShader): GLProgram {
     const program = createProgram(vertexShader, fragmentShader)
     const uniforms = getUniforms(program)
@@ -731,21 +846,21 @@ function onContextCreate(
   }
 
   // Compile all shaders
-  const baseVertex = compileShader(gl.VERTEX_SHADER, baseVertexShader, ['baseVertex'])
-  const splatFrag = compileShader(gl.FRAGMENT_SHADER, splatShader, ['splatFrag'])
-  const displayFrag = compileShader(gl.FRAGMENT_SHADER, displayShader, ['displayFrag'])
-  const curlFrag = compileShader(gl.FRAGMENT_SHADER, curlShader, ['curlFrag'])
-  const vorticityFrag = compileShader(gl.FRAGMENT_SHADER, vorticityShader, ['vorticityFrag'])
-  const divergenceFrag = compileShader(gl.FRAGMENT_SHADER, divergenceShader, ['divergenceFrag'])
-  const scaleFrag = compileShader(gl.FRAGMENT_SHADER, scaleShader, ['scaleFrag'])
-  const pressureFrag = compileShader(gl.FRAGMENT_SHADER, pressureShader, ['pressureFrag'])
-  const gradientFrag = compileShader(gl.FRAGMENT_SHADER, gradientShader, ['gradientFrag'])
-  const advectionFrag = compileShader(
-    gl.FRAGMENT_SHADER,
-    advectionShader,
-    ext.supportLinearFiltering ? null : ['MANUAL_FILTERING'],
-  )
-  const macCormackFrag = compileShader(gl.FRAGMENT_SHADER, macCormackShader, ['macCormackFrag'])
+  const baseVertex = compileShader({ type: gl.VERTEX_SHADER, source: baseVertexShader, keywords: ['baseVertex'] })
+  const splatFrag = compileShader({ type: gl.FRAGMENT_SHADER, source: splatShader, keywords: ['splatFrag'] })
+  const displayFrag = compileShader({ type: gl.FRAGMENT_SHADER, source: displayShader, keywords: ['displayFrag'] })
+  const curlFrag = compileShader({ type: gl.FRAGMENT_SHADER, source: curlShader, keywords: ['curlFrag'] })
+  const vorticityFrag = compileShader({ type: gl.FRAGMENT_SHADER, source: vorticityShader, keywords: ['vorticityFrag'] })
+  const divergenceFrag = compileShader({ type: gl.FRAGMENT_SHADER, source: divergenceShader, keywords: ['divergenceFrag'] })
+  const scaleFrag = compileShader({ type: gl.FRAGMENT_SHADER, source: scaleShader, keywords: ['scaleFrag'] })
+  const pressureFrag = compileShader({ type: gl.FRAGMENT_SHADER, source: pressureShader, keywords: ['pressureFrag'] })
+  const gradientFrag = compileShader({ type: gl.FRAGMENT_SHADER, source: gradientShader, keywords: ['gradientFrag'] })
+  const advectionFrag = compileShader({
+    type: gl.FRAGMENT_SHADER,
+    source: advectionShader,
+    keywords: ext.supportLinearFiltering ? null : ['MANUAL_FILTERING'],
+  })
+  const macCormackFrag = compileShader({ type: gl.FRAGMENT_SHADER, source: macCormackShader, keywords: ['macCormackFrag'] })
 
   const splatProgram = makeProgram(baseVertex, splatFrag)
   const displayProgram = makeProgram(baseVertex, displayFrag)
@@ -760,6 +875,11 @@ function onContextCreate(
 
   // --- Fullscreen blit ---
 
+  /**
+   * Draw a fullscreen quad into `target` (or the default framebuffer when null).
+   * Maintained as an IIFE so the static unit-quad VBO is created exactly once per context.
+   * Pushes `uTexelSize` into the currently bound program if it declares one.
+   */
   const blit = (() => {
     gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer())
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, -1, 1, 1, 1, 1, -1]), gl.STATIC_DRAW)
@@ -790,6 +910,7 @@ function onContextCreate(
 
   // --- FBO helpers ---
 
+  /** Create a single FBO with one color attachment and the given filter mode. */
   function createFBO(params: CreateFBOParams): FBO {
     const { w, h, internalFormat, format, type, filtering } = params
     gl.activeTexture(gl.TEXTURE0)
@@ -820,6 +941,7 @@ function onContextCreate(
     }
   }
 
+  /** Create a ping-pong (read/write + swap) FBO for accumulator passes like dye, velocity, and pressure. */
   function createDoubleFBO(params: CreateFBOParams): DoubleFBO {
     const result: DoubleFBO = {
       width: params.w,
@@ -851,7 +973,8 @@ function onContextCreate(
   let dyeBar: FBO
 
   /** Clear a FBO to a solid RGBA color. Used to prime the dye field with full crema. */
-  function clearFBO(target: FBO, r: number, g: number, b: number, a: number) {
+  function clearFBO(params: ClearFBOParams) {
+    const { target, r, g, b, a } = params
     gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo)
     gl.viewport(0, 0, target.width, target.height)
     gl.clearColor(r, g, b, a)
@@ -868,92 +991,36 @@ function onContextCreate(
     const filtering = ext.supportLinearFiltering ? gl.LINEAR : gl.NEAREST
     gl.disable(gl.BLEND)
 
-    if (dye == null)
-      dye = createDoubleFBO({
-        w: dyeRes.width,
-        h: dyeRes.height,
-        internalFormat: rgba.internalFormat,
-        format: rgba.format,
-        type: texType,
-        filtering,
-      })
-    if (velocity == null)
-      velocity = createDoubleFBO({
-        w: simRes.width,
-        h: simRes.height,
-        internalFormat: rg.internalFormat,
-        format: rg.format,
-        type: texType,
-        filtering,
-      })
-    if (curl == null)
-      curl = createFBO({
-        w: simRes.width,
-        h: simRes.height,
-        internalFormat: r.internalFormat,
-        format: r.format,
-        type: texType,
-        filtering: gl.NEAREST,
-      })
-    if (divergence == null)
-      divergence = createFBO({
-        w: simRes.width,
-        h: simRes.height,
-        internalFormat: r.internalFormat,
-        format: r.format,
-        type: texType,
-        filtering: gl.NEAREST,
-      })
-    if (pressure == null)
-      pressure = createDoubleFBO({
-        w: simRes.width,
-        h: simRes.height,
-        internalFormat: r.internalFormat,
-        format: r.format,
-        type: texType,
-        filtering: gl.NEAREST,
-      })
-    if (velHat == null)
-      velHat = createFBO({
-        w: simRes.width,
-        h: simRes.height,
-        internalFormat: rg.internalFormat,
-        format: rg.format,
-        type: texType,
-        filtering,
-      })
-    if (velBar == null)
-      velBar = createFBO({
-        w: simRes.width,
-        h: simRes.height,
-        internalFormat: rg.internalFormat,
-        format: rg.format,
-        type: texType,
-        filtering,
-      })
-    if (dyeHat == null)
-      dyeHat = createFBO({
-        w: dyeRes.width,
-        h: dyeRes.height,
-        internalFormat: rgba.internalFormat,
-        format: rgba.format,
-        type: texType,
-        filtering,
-      })
-    if (dyeBar == null)
-      dyeBar = createFBO({
-        w: dyeRes.width,
-        h: dyeRes.height,
-        internalFormat: rgba.internalFormat,
-        format: rgba.format,
-        type: texType,
-        filtering,
-      })
+    /** Build a single FBO at sim resolution with the given format and filter mode. */
+    const simFBO = (fmt: TextureFormat, filter: number): FBO =>
+      createFBO({ w: simRes.width, h: simRes.height, internalFormat: fmt.internalFormat, format: fmt.format, type: texType, filtering: filter })
+
+    /** Build a single FBO at dye resolution with the given format and filter mode. */
+    const dyeFBO = (fmt: TextureFormat, filter: number): FBO =>
+      createFBO({ w: dyeRes.width, h: dyeRes.height, internalFormat: fmt.internalFormat, format: fmt.format, type: texType, filtering: filter })
+
+    /** Build a ping-pong (read/write) FBO at sim resolution. */
+    const simDoubleFBO = (fmt: TextureFormat, filter: number): DoubleFBO =>
+      createDoubleFBO({ w: simRes.width, h: simRes.height, internalFormat: fmt.internalFormat, format: fmt.format, type: texType, filtering: filter })
+
+    /** Build a ping-pong (read/write) FBO at dye resolution. */
+    const dyeDoubleFBO = (fmt: TextureFormat, filter: number): DoubleFBO =>
+      createDoubleFBO({ w: dyeRes.width, h: dyeRes.height, internalFormat: fmt.internalFormat, format: fmt.format, type: texType, filtering: filter })
+
+    if (dye == null) dye = dyeDoubleFBO(rgba, filtering)
+    if (velocity == null) velocity = simDoubleFBO(rg, filtering)
+    if (curl == null) curl = simFBO(r, gl.NEAREST)
+    if (divergence == null) divergence = simFBO(r, gl.NEAREST)
+    if (pressure == null) pressure = simDoubleFBO(r, gl.NEAREST)
+    if (velHat == null) velHat = simFBO(rg, filtering)
+    if (velBar == null) velBar = simFBO(rg, filtering)
+    if (dyeHat == null) dyeHat = dyeFBO(rgba, filtering)
+    if (dyeBar == null) dyeBar = dyeFBO(rgba, filtering)
 
     // Prime the cup with a full crema layer (g = 1.0). Both read/write buffers seeded
     // so the first swap doesn't overwrite with a stale zeroed buffer.
-    clearFBO(dye.read, 0.0, 1.0, 0.0, 1.0)
-    clearFBO(dye.write, 0.0, 1.0, 0.0, 1.0)
+    clearFBO({ target: dye.read, r: 0.0, g: 1.0, b: 0.0, a: 1.0 })
+    clearFBO({ target: dye.write, r: 0.0, g: 1.0, b: 0.0, a: 1.0 })
   }
 
   // --- Simulation ---
@@ -964,7 +1031,7 @@ function onContextCreate(
    */
   function splat(params: SplatParams) {
     const { x, y, dx, dy, color, radiusPct, radialForce, heightFactor } = params
-    const radius = (radiusPct !== undefined ? radiusPct : config.SPLAT_RADIUS) / 10000.0
+    const radius = (radiusPct ?? config.SPLAT_RADIUS) / 10000.0
     const h = heightFactor ?? 0
 
     splatProgram.bind()
@@ -973,8 +1040,7 @@ function onContextCreate(
     gl.uniform2f(splatProgram.uniforms.uPoint, x, y)
     gl.uniform1f(splatProgram.uniforms.uMaskMode, 0.0)
     gl.uniform1f(splatProgram.uniforms.uHeightFactor, h)
-    gl.uniform2f(splatProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
-    gl.uniform2f(splatProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
+    setCupUniforms(splatProgram)
 
     const len = Math.sqrt(dx * dx + dy * dy)
     const pourDirX = len > 0.0001 ? dx / len : 0.0
@@ -1015,12 +1081,12 @@ function onContextCreate(
 
   /** Drain pending splats from the queue, adaptively capped per frame for performance. */
   function applyInputs() {
-    const qlen = splatStackRef.current?.length ?? 0
-    const maxSplatsPerFrame = Math.min(8, Math.max(2, Math.ceil(qlen / 4)))
+    const queue = splatStackRef.current
+    const maxSplatsPerFrame = Math.min(8, Math.max(2, Math.ceil(queue.length / 4)))
     const heightFactor = config.PITCHER_HEIGHT
     let processed = 0
-    while ((splatStackRef.current?.length ?? 0) > 0 && processed < maxSplatsPerFrame) {
-      const s = splatStackRef.current!.shift()!
+    while (queue.length > 0 && processed < maxSplatsPerFrame) {
+      const s = queue.shift()!
       const flowRate = 1.0 + Math.min(0.5, s.elapsedTime * 0.1)
       const pressureScale = 0.7 + 0.3 * s.pressure
       const radiusPct = config.SPLAT_RADIUS / (flowRate * pressureScale)
@@ -1042,59 +1108,73 @@ function onContextCreate(
   /** Render the display shader: composites dye over espresso with lighting. */
   function drawDisplay(target: FBO | null) {
     displayProgram.bind()
-    gl.uniform1i(displayProgram.uniforms.uTexture, dye.read.attach(0))
-    gl.uniform3f(
-      displayProgram.uniforms.uEspresso,
-      config.ESPRESSO_COLOR.r,
-      config.ESPRESSO_COLOR.g,
-      config.ESPRESSO_COLOR.b,
-    )
-    gl.uniform3f(displayProgram.uniforms.uMilk, config.MILK_COLOR.r, config.MILK_COLOR.g, config.MILK_COLOR.b)
-    gl.uniform3f(
-      displayProgram.uniforms.uCremaTint,
-      config.CREMA_TINT_COLOR.r,
-      config.CREMA_TINT_COLOR.g,
-      config.CREMA_TINT_COLOR.b,
-    )
-    gl.uniform3f(
-      displayProgram.uniforms.uMilkRim,
-      config.MILK_RIM_COLOR.r,
-      config.MILK_RIM_COLOR.g,
-      config.MILK_RIM_COLOR.b,
-    )
-    gl.uniform3f(
-      displayProgram.uniforms.uSpecularTint,
-      config.SPECULAR_TINT_COLOR.r,
-      config.SPECULAR_TINT_COLOR.g,
-      config.SPECULAR_TINT_COLOR.b,
-    )
-    gl.uniform1f(displayProgram.uniforms.uMilkOpacity, config.MILK_OPACITY)
-    gl.uniform1f(displayProgram.uniforms.uValleyStrength, config.VALLEY_STRENGTH)
-    gl.uniform1f(displayProgram.uniforms.uCremaStrength, config.CREMA_STRENGTH)
-    gl.uniform1f(displayProgram.uniforms.uMilkSpecular, config.MILK_SPECULAR)
-    gl.uniform1f(displayProgram.uniforms.uSpecularPower, config.SPECULAR_POWER)
-    gl.uniform1f(displayProgram.uniforms.uMaskHarden, config.MASK_HARDEN)
-    gl.uniform1f(displayProgram.uniforms.uFoamAbsorption, config.FOAM_ABSORPTION)
-    gl.uniform1f(displayProgram.uniforms.uSpecularClamp, config.SPECULAR_CLAMP)
-    gl.uniform2f(displayProgram.uniforms.uDyeTexelSize, dye.texelSizeX, dye.texelSizeY)
-    gl.uniform2f(displayProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
-    gl.uniform2f(displayProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
-    gl.uniform3f(
-      displayProgram.uniforms.uCupBackground,
-      config.CUP_BACKGROUND_COLOR.r,
-      config.CUP_BACKGROUND_COLOR.g,
-      config.CUP_BACKGROUND_COLOR.b,
-    )
-    gl.uniform1f(displayProgram.uniforms.uRimThicknessFrac, cupParams.rimThicknessFrac)
-    gl.uniform3f(displayProgram.uniforms.uRimColor, config.RIM_COLOR.r, config.RIM_COLOR.g, config.RIM_COLOR.b)
-    gl.uniform3f(
-      displayProgram.uniforms.uRimShadowColor,
-      config.RIM_SHADOW_COLOR.r,
-      config.RIM_SHADOW_COLOR.g,
-      config.RIM_SHADOW_COLOR.b,
-    )
-    gl.uniform1f(displayProgram.uniforms.uAspect, gl.drawingBufferWidth / gl.drawingBufferHeight)
+    const u = displayProgram.uniforms
+    gl.uniform1i(u.uTexture, dye.read.attach(0))
+    setColorUniform(u.uEspresso, config.ESPRESSO_COLOR)
+    setColorUniform(u.uMilk, config.MILK_COLOR)
+    setColorUniform(u.uCremaTint, config.CREMA_TINT_COLOR)
+    setColorUniform(u.uMilkRim, config.MILK_RIM_COLOR)
+    setColorUniform(u.uSpecularTint, config.SPECULAR_TINT_COLOR)
+    setColorUniform(u.uCupBackground, config.CUP_BACKGROUND_COLOR)
+    setColorUniform(u.uRimColor, config.RIM_COLOR)
+    setColorUniform(u.uRimShadowColor, config.RIM_SHADOW_COLOR)
+    gl.uniform1f(u.uMilkOpacity, config.MILK_OPACITY)
+    gl.uniform1f(u.uValleyStrength, config.VALLEY_STRENGTH)
+    gl.uniform1f(u.uCremaStrength, config.CREMA_STRENGTH)
+    gl.uniform1f(u.uMilkSpecular, config.MILK_SPECULAR)
+    gl.uniform1f(u.uSpecularPower, config.SPECULAR_POWER)
+    gl.uniform1f(u.uMaskHarden, config.MASK_HARDEN)
+    gl.uniform1f(u.uFoamAbsorption, config.FOAM_ABSORPTION)
+    gl.uniform1f(u.uSpecularClamp, config.SPECULAR_CLAMP)
+    gl.uniform2f(u.uDyeTexelSize, dye.texelSizeX, dye.texelSizeY)
+    gl.uniform1f(u.uRimThicknessFrac, cupParams.rimThicknessFrac)
+    gl.uniform1f(u.uAspect, gl.drawingBufferWidth / gl.drawingBufferHeight)
+    setCupUniforms(displayProgram)
     blit(target)
+  }
+
+  /**
+   * MacCormack advect a single field. Forward pass writes phi_hat, backward writes phi_bar,
+   * combine pass clamps `phi_hat + 0.5*(phi - phi_bar)` and writes to `dst`. The caller is
+   * responsible for swapping the field's read/write buffers afterwards.
+   *
+   * `uVelTexelSize` is always the velocity grid (so the trace distance matches across resolutions);
+   * `uDyeTexelSize` falls back to the destination grid only when linear filtering is unavailable.
+   */
+  const advectMacCormack = (params: AdvectMacCormackParams) => {
+    const { source, dst, hat, bar, dstTexelSize, dissipation, dt } = params
+
+    advectionProgram.bind()
+    setCupUniforms(advectionProgram)
+    gl.uniform2f(advectionProgram.uniforms.uVelTexelSize, velocity.texelSizeX, velocity.texelSizeY)
+    if (!ext.supportLinearFiltering)
+      gl.uniform2f(advectionProgram.uniforms.uDyeTexelSize, dstTexelSize[0], dstTexelSize[1])
+
+    // Forward: phi_hat = advect(phi, v, +dt)
+    gl.uniform1i(advectionProgram.uniforms.uVelocity, velocity.read.attach(0))
+    gl.uniform1i(advectionProgram.uniforms.uSource, source.attach(1))
+    gl.uniform1f(advectionProgram.uniforms.uDt, dt)
+    gl.uniform1f(advectionProgram.uniforms.uDissipation, 0.0)
+    blit(hat)
+
+    // Backward: phi_bar = advect(phi_hat, v, -dt)
+    gl.uniform1i(advectionProgram.uniforms.uVelocity, velocity.read.attach(0))
+    gl.uniform1i(advectionProgram.uniforms.uSource, hat.attach(1))
+    gl.uniform1f(advectionProgram.uniforms.uDt, -dt)
+    gl.uniform1f(advectionProgram.uniforms.uDissipation, 0.0)
+    blit(bar)
+
+    // Combine: dst = clamp(phi_hat + 0.5*(phi - phi_bar))
+    macCormackProgram.bind()
+    setCupUniforms(macCormackProgram)
+    gl.uniform2f(macCormackProgram.uniforms.uVelTexelSize, velocity.texelSizeX, velocity.texelSizeY)
+    gl.uniform1i(macCormackProgram.uniforms.uField, source.attach(0))
+    gl.uniform1i(macCormackProgram.uniforms.uVelocity, velocity.read.attach(1))
+    gl.uniform1i(macCormackProgram.uniforms.uHat, hat.attach(2))
+    gl.uniform1i(macCormackProgram.uniforms.uBar, bar.attach(3))
+    gl.uniform1f(macCormackProgram.uniforms.uDt, dt)
+    gl.uniform1f(macCormackProgram.uniforms.uDissipation, dissipation)
+    blit(dst)
   }
 
   /** Execute one full simulation step: curl → vorticity → divergence → pressure → gradient → advection. */
@@ -1104,8 +1184,7 @@ function onContextCreate(
     if (config.CURL !== 0) {
       curlProgram.bind()
       gl.uniform1i(curlProgram.uniforms.uVelocity, velocity.read.attach(0))
-      gl.uniform2f(curlProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
-      gl.uniform2f(curlProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
+      setCupUniforms(curlProgram)
       blit(curl)
 
       vorticityProgram.bind()
@@ -1113,16 +1192,14 @@ function onContextCreate(
       gl.uniform1i(vorticityProgram.uniforms.uCurl, curl.attach(1))
       gl.uniform1f(vorticityProgram.uniforms.uCurlStrength, config.CURL)
       gl.uniform1f(vorticityProgram.uniforms.uDt, dt)
-      gl.uniform2f(vorticityProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
-      gl.uniform2f(vorticityProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
+      setCupUniforms(vorticityProgram)
       blit(velocity.write)
       velocity.swap()
     }
 
     divergenceProgram.bind()
     gl.uniform1i(divergenceProgram.uniforms.uVelocity, velocity.read.attach(0))
-    gl.uniform2f(divergenceProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
-    gl.uniform2f(divergenceProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
+    setCupUniforms(divergenceProgram)
     blit(divergence)
 
     scaleProgram.bind()
@@ -1132,8 +1209,7 @@ function onContextCreate(
     pressure.swap()
 
     pressureProgram.bind()
-    gl.uniform2f(pressureProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
-    gl.uniform2f(pressureProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
+    setCupUniforms(pressureProgram)
     gl.uniform1i(pressureProgram.uniforms.uDivergence, divergence.attach(0))
     for (let i = 0; i < config.PRESSURE_ITERATIONS; i++) {
       gl.uniform1i(pressureProgram.uniforms.uPressure, pressure.read.attach(1))
@@ -1142,82 +1218,34 @@ function onContextCreate(
     }
 
     gradientSubtractProgram.bind()
-    gl.uniform2f(gradientSubtractProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
-    gl.uniform2f(gradientSubtractProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
+    setCupUniforms(gradientSubtractProgram)
     gl.uniform1i(gradientSubtractProgram.uniforms.uPressure, pressure.read.attach(0))
     gl.uniform1i(gradientSubtractProgram.uniforms.uVelocity, velocity.read.attach(1))
     blit(velocity.write)
     velocity.swap()
 
-    // Advect velocity — MacCormack (forward, backward, correct+clamp).
-    // uVelTexelSize is bound from the velocity grid for ALL advection passes
-    // so the trace covers the same UV distance regardless of target FBO.
-    advectionProgram.bind()
-    gl.uniform2f(advectionProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
-    gl.uniform2f(advectionProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
-    gl.uniform2f(advectionProgram.uniforms.uVelTexelSize, velocity.texelSizeX, velocity.texelSizeY)
-    if (!ext.supportLinearFiltering)
-      gl.uniform2f(advectionProgram.uniforms.uDyeTexelSize, velocity.texelSizeX, velocity.texelSizeY)
-    // Forward: phi_hat = advect(phi, v, +dt)
-    let velId = velocity.read.attach(0)
-    gl.uniform1i(advectionProgram.uniforms.uVelocity, velId)
-    gl.uniform1i(advectionProgram.uniforms.uSource, velId)
-    gl.uniform1f(advectionProgram.uniforms.uDt, dt)
-    gl.uniform1f(advectionProgram.uniforms.uDissipation, 0.0)
-    blit(velHat)
-    // Backward: phi_bar = advect(phi_hat, v, -dt)
-    velId = velocity.read.attach(0)
-    gl.uniform1i(advectionProgram.uniforms.uVelocity, velId)
-    gl.uniform1i(advectionProgram.uniforms.uSource, velHat.attach(1))
-    gl.uniform1f(advectionProgram.uniforms.uDt, -dt)
-    gl.uniform1f(advectionProgram.uniforms.uDissipation, 0.0)
-    blit(velBar)
-    // Combine: velocity.write = clamp(phi_hat + 0.5*(phi - phi_bar))
-    macCormackProgram.bind()
-    gl.uniform2f(macCormackProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
-    gl.uniform2f(macCormackProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
-    gl.uniform2f(macCormackProgram.uniforms.uVelTexelSize, velocity.texelSizeX, velocity.texelSizeY)
-    velId = velocity.read.attach(0)
-    gl.uniform1i(macCormackProgram.uniforms.uField, velId)
-    gl.uniform1i(macCormackProgram.uniforms.uVelocity, velId)
-    gl.uniform1i(macCormackProgram.uniforms.uHat, velHat.attach(1))
-    gl.uniform1i(macCormackProgram.uniforms.uBar, velBar.attach(2))
-    gl.uniform1f(macCormackProgram.uniforms.uDt, dt)
-    gl.uniform1f(macCormackProgram.uniforms.uDissipation, config.VELOCITY_DISSIPATION)
-    blit(velocity.write)
+    // Advect velocity (MacCormack: forward → backward → corrected/clamped combine).
+    advectMacCormack({
+      source: velocity.read,
+      dst: velocity.write,
+      hat: velHat,
+      bar: velBar,
+      dstTexelSize: [velocity.texelSizeX, velocity.texelSizeY],
+      dissipation: config.VELOCITY_DISSIPATION,
+      dt,
+    })
     velocity.swap()
 
     // Advect dye (milk + crema channels) — MacCormack.
-    advectionProgram.bind()
-    gl.uniform2f(advectionProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
-    gl.uniform2f(advectionProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
-    gl.uniform2f(advectionProgram.uniforms.uVelTexelSize, velocity.texelSizeX, velocity.texelSizeY)
-    if (!ext.supportLinearFiltering)
-      gl.uniform2f(advectionProgram.uniforms.uDyeTexelSize, dye.texelSizeX, dye.texelSizeY)
-    // Forward
-    gl.uniform1i(advectionProgram.uniforms.uVelocity, velocity.read.attach(0))
-    gl.uniform1i(advectionProgram.uniforms.uSource, dye.read.attach(1))
-    gl.uniform1f(advectionProgram.uniforms.uDt, dt)
-    gl.uniform1f(advectionProgram.uniforms.uDissipation, 0.0)
-    blit(dyeHat)
-    // Backward
-    gl.uniform1i(advectionProgram.uniforms.uVelocity, velocity.read.attach(0))
-    gl.uniform1i(advectionProgram.uniforms.uSource, dyeHat.attach(1))
-    gl.uniform1f(advectionProgram.uniforms.uDt, -dt)
-    gl.uniform1f(advectionProgram.uniforms.uDissipation, 0.0)
-    blit(dyeBar)
-    // Combine
-    macCormackProgram.bind()
-    gl.uniform2f(macCormackProgram.uniforms.uCupCenter, cupParams.center[0], cupParams.center[1])
-    gl.uniform2f(macCormackProgram.uniforms.uCupRadiusUV, cupParams.radiusUV[0], cupParams.radiusUV[1])
-    gl.uniform2f(macCormackProgram.uniforms.uVelTexelSize, velocity.texelSizeX, velocity.texelSizeY)
-    gl.uniform1i(macCormackProgram.uniforms.uField, dye.read.attach(0))
-    gl.uniform1i(macCormackProgram.uniforms.uVelocity, velocity.read.attach(1))
-    gl.uniform1i(macCormackProgram.uniforms.uHat, dyeHat.attach(2))
-    gl.uniform1i(macCormackProgram.uniforms.uBar, dyeBar.attach(3))
-    gl.uniform1f(macCormackProgram.uniforms.uDt, dt)
-    gl.uniform1f(macCormackProgram.uniforms.uDissipation, config.DENSITY_DISSIPATION)
-    blit(dye.write)
+    advectMacCormack({
+      source: dye.read,
+      dst: dye.write,
+      hat: dyeHat,
+      bar: dyeBar,
+      dstTexelSize: [dye.texelSizeX, dye.texelSizeY],
+      dissipation: config.DENSITY_DISSIPATION,
+      dt,
+    })
     dye.swap()
   }
 
