@@ -5,7 +5,9 @@ import {
   NativeSyntheticEvent,
   Pressable,
   PressableProps,
+  StyleProp,
   TargetedEvent,
+  ViewStyle,
 } from 'react-native'
 import { PressableRef } from '@rn-primitives/types'
 import { cn } from '~/lib/utilities/cn'
@@ -48,9 +50,11 @@ const isContentElement = (child: ReactElement): child is ReactElement<ContentPro
 }
 
 /** StyledPressable - props */
-export interface StyledPressableProps extends PressableProps {
+export interface StyledPressableProps extends Omit<PressableProps, 'style'> {
   /** children components */
   children?: ReactNode
+  /** style applied to the styled box, alongside `className` */
+  style?: StyleProp<ViewStyle>
   /** class name applied on hover */
   hoveredClassName?: string
   /** class name applied on focus */
@@ -63,6 +67,7 @@ export const StyledPressable = forwardRef<PressableRef, StyledPressableProps>(
   (
     {
       className,
+      style,
       hoveredClassName = '',
       focusedClassName = '',
       pressedClassName = '',
@@ -158,6 +163,7 @@ export const StyledPressable = forwardRef<PressableRef, StyledPressableProps>(
         {...props}
       >
         <View
+          style={style}
           className={cn(
             className,
             isHovered && hoveredClassName,

@@ -1,129 +1,80 @@
 # AGENTS.md
 
-This file provides guidance to all AI coding agents when working with code in this repository.
+Context for AI coding agents working in this repository. `CLAUDE.md` points here, so this is the
+single source of agent context.
 
-## Project Overview
+## What this is
 
-**Pour My Friends** is a React Native / Expo app that simulates latte art creation via an interactive fluid dynamics simulator running on WebGL shaders.
+Pour My Friends is an Expo / React Native app (iOS, Android, web) whose one real feature is an
+interactive latte art simulator: a 2D fluid simulation running on WebGL shaders, driven by
+touch. Everything else is a thin shell around that screen.
 
 ## Commands
 
-```bash
-yarn install          # Install dependencies
-yarn start            # Start Expo dev server
-yarn ios              # Run on iOS simulator
-yarn android          # Run on Android emulator
-yarn web              # Run web version (localhost:8081)
+```sh
+yarn                  # install dependencies
+yarn start            # Expo dev server
+yarn web              # web dev server at http://localhost:8081
+yarn ios              # iOS simulator
+yarn android          # Android emulator
+yarn prebuild         # expo prebuild --clean — regenerates ios/ and android/
 
-yarn test             # Run Jest tests
-yarn check:lint       # Run ESLint
-yarn check:prettier   # Check Prettier formatting
-yarn check:expo       # Run expo-doctor health check
+yarn test             # Jest
+yarn jest path/to/test.ts   # single test file
+yarn check:lint       # ESLint
+yarn check:prettier   # Prettier (check only)
+yarn check:expo       # expo-doctor
 
-yarn prebuild         # Clean and regenerate native directories
-yarn build:android    # Production Android build via EAS
-yarn build:apple      # Production iOS build via EAS
-yarn build:web        # Web build via EAS
-
-yarn env:development  # Pull development .env from EAS
-yarn env:preview      # Pull preview .env from EAS
+yarn screenshots      # regenerate docs/screenshots/*.png used by the README
 ```
 
-To run a single test file:
-```bash
-yarn jest path/to/test.ts
-```
+Builds and environment variables: see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-## Architecture
+## Map
 
-### Routing & Screens
+| Path                                   | What lives there                                                                                                                                      |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `app/`                                 | Expo Router routes: `/` splash, `/home`, `/rosetta`, `/about`. Each is a one-line re-export of a screen; `_layout.tsx` holds fonts, theme, providers. |
+| `components/screens/Rosetta/index.tsx` | The simulator — ~1300 lines: React screen + HUD, then `onContextCreate` with the whole WebGL pipeline.                                                |
+| `components/screens/Rosetta/shaders/`  | GLSL, imported as strings via `babel-plugin-inline-import`.                                                                                           |
+| `components/primitives/`               | `cssInterop`-wrapped RN components so NativeWind `className` works, plus `MilkText`.                                                                  |
+| `components/providers/`                | `AnalyticsProviders` → `CaptureProvider`, consumed via `useCapture()`.                                                                                |
+| `hooks/`, `lib/`                       | Hooks; colors, `cn()`, analytics models.                                                                                                              |
+| `scripts/screenshots.mjs`              | Playwright capture of every route for the README.                                                                                                     |
+| `docs/`                                | Architecture, development, conventions.                                                                                                               |
 
-Expo Router provides file-based routing from `app/`. The app has a single main screen: `app/index.tsx` renders the Rosetta simulator. The root layout (`app/_layout.tsx`) sets up theming, fonts, and the analytics provider.
+Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before changing the simulator — it explains the
+per-frame pass order, the MacCormack advection, and the ping-pong framebuffers.
 
-### Core Feature: Rosetta Fluid Simulator
+## Conventions
 
-`components/screens/Rosetta/index.tsx` (~925 lines) is the heart of the app. It implements a GPU-accelerated 2D fluid dynamics simulation:
+[docs/CONVENTIONS.md](docs/CONVENTIONS.md) is the full house style: strict TypeScript with TSDoc,
+named exports, NativeWind-first styling, `~/` import alias, options-object parameters for
+anything past two arguments. Match the surrounding file — the simulator's comment style
+(explaining fluid behavior in plain language) is deliberate; keep it.
 
-- **WebGL pipeline**: Uses `expo-gl` to run a multi-pass shader pipeline each frame
-- **Shader passes**: Splat (user input) → Curl → Vorticity → Divergence → Pressure (iterative solve) → Gradient subtraction → Advection → Display
-- **Display shader**: Composites milk (dye) over espresso with lighting and valley detection for the latte art look
-- **Input**: React Native `PanResponder` feeds touch velocity into the velocity field as "splats"
-- **Tuning params**: `SPLAT_RADIUS`, `VELOCITY_DISSIPATION`, `DENSITY_DISSIPATION`, `PRESSURE_ITERATIONS`, etc. control simulation feel
+## Things that will surprise you
 
-### Component & Hook Structure
+- **`config` is a module-level object** in the simulator, mutated directly by the settings modal.
+  That's intentional: retuning must not re-render or rebuild the GL context. Don't "fix" it into
+  React state.
+- **`simKey`** on the `GLView` is the deliberate way to rebuild the WebGL context (fresh cup).
+  Settings survive it because they live in `config`, not state.
+- **Typed routes** are generated into `.expo/types/router.d.ts` when the dev server runs. Adding a
+  route without starting Expo leaves the types stale.
+- **`ios/` and `android/` are generated** by `yarn prebuild` and gitignored. Change `app.config.ts`
+  or a config plugin instead of editing them.
+- **`computeCupParams`** is shared by the touch handler and the GL uniforms and is unit-tested —
+  if you change cup geometry, both sides must stay in agreement.
+- **Size primitives with plain style props, not NativeWind CSS variables.** `vars({ h: 44 })` plus
+  `h-[--h]` silently does nothing on web — the variable is unitless, so the CSS is invalid — which
+  is why `Button` passes `height`/`width`/padding as a normal style object.
 
-- `components/primitives/` — styled wrappers around RN core components (Text, View, Button, etc.) using NativeWind
-- `components/providers/` — `AnalyticsProviders` wraps `CaptureProvider`; consumed via `useCapture()` hook
-- `hooks/` — custom hooks for storage (`useAsyncStorage`), preferences (`usePreference`), theming (`useColorScheme`), breakpoints (`useBreakpoints`)
-- `lib/core/` — enums and models for analytics events and user preferences
-- `lib/utilities/capture.ts` — analytics event dispatch function
-- `lib/colors.ts` — light/dark color palette used by Tailwind config
+## Before saying it's done
 
-### Styling
-
-NativeWind (Tailwind for React Native) with a custom theme in `tailwind.config.js`. Colors are CSS variables defined in `lib/colors.ts`. Dark mode uses class-based strategy. Custom fonts: Inter Display and SF Pro Display.
-
-### TypeScript Path Aliases
-
-`~/*` and `@/*` both resolve to the project root (configured in `tsconfig.json`).
-
-### Environment & Builds
-
-- `lib/config.ts` reads `EXPO_PUBLIC_APP_VARIANT` to distinguish `development`, `preview`, `production`, and `test` builds
-- `eas.json` defines three EAS build profiles; `app.config.ts` configures bundle IDs and plugins
-- Web deployment targets Vercel (`vercel.json`)
-- New Architecture is enabled (`newArchEnabled: true` in `app.config.ts`)
-
-## Workflow Orchestration
-
-### 1. Plan Mode Default
-- Enter plan mode for ANY non-trivial task (3+ steps or architectural decisions)
-- If something goes sideways, STOP and re-plan immediately - don't keep pushing
-- Use plan mode for verification steps, not just building
-- Write detailed specs upfront to reduce ambiguity
-
-### 2. Subagent Strategy to keep main context window clean
-- Offload research, exploration, and parallel analysis to subagents
-- For complex problems, throw more compute at it via subagents
-- One task per subagent for focused execution
-
-### 3. Self-Improvement Loop
-- After ANY correction from the user: update 'tasks/lessons.md' with the pattern
-- Write rules for yourself that prevent the same mistake
-- Ruthlessly iterate on these lessons until mistake rate drops
-- Review lessons at session start for relevant project
-
-### 4. Verification Before Done
-- Never mark a task complete without proving it works
-- Diff behavior between main and your changes when relevant
-- Ask yourself: "Would a staff engineer approve this?"
-- Run tests, check logs, demonstrate correctness
-
-### 5. Demand Elegance (Balanced)
-- For non-trivial changes: pause and ask "is there a more elegant way?"
-- If a fix feels hacky: "Knowing everything I know now, implement the elegant solution"
-- Skip this for simple, obvious fixes - don't over-engineer
-- Challenge your own work before presenting it
-
-### 6. Autonomous Bug Fixing
-- When given a bug report: just fix it. Don't ask for hand-holding
-- Point at logs, errors, failing tests -> then resolve them
-- Zero context switching required from the user
-- Go fix failing CI tests without being told how
-
-## Task Management
-1. **Plan First**: Write plan to 'tasks/todo.md' with checkable items
-2. **Verify Plan**: Check in before starting implementation
-3. **Track Progress**: Mark items complete as you go
-4. **Explain Changes**: High-level summary at each step
-5. **Document Results**: Add review to 'tasks/todo.md'
-6. **Capture Lessons**: Update 'tasks/lessons.md' after corrections
-
-## Core Principles
-- **Simplicity First**: Make every change as simple as possible. Impact minimal code.
-- **No Laziness**: Find root causes. No temporary fixes. Senior developer standards.
-- **Minimal Impact**: Changes should only touch what's necessary. Avoid introducing bugs.
-
-### Rules
-
-Rules are located in @/.cursor/rules
+Run `yarn test`, `yarn check:lint`, and `yarn check:prettier`. Lint is clean (4 warnings, 0
+errors); Prettier still reports pre-existing failures in files this repo hasn't formatted yet, so
+compare against `main` rather than assuming you caused them.
+For simulator changes, actually run it (`yarn web` and pour, or `yarn screenshots` and look at
+`docs/screenshots/rosetta.png`) — shader regressions don't show up in tests. Report what you
+ran and what it said.
