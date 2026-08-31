@@ -3,6 +3,7 @@
 
 # Only check these files
 !*.js
+!*.mjs
 !*.jsx
 !*.cjs
 !*.ts

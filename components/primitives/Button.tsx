@@ -1,6 +1,5 @@
 import { ReactNode, forwardRef } from 'react'
 import { TextProps } from 'react-native'
-import { vars } from 'nativewind'
 import { cn } from '~/lib/utilities/cn'
 import { useScale } from '~/hooks/useScale'
 import { StyledPressable, StyledPressableProps } from '~/components/primitives/StyledPressable'
@@ -35,11 +34,11 @@ export const ButtonText = ({
   const { dp } = useScale()
   return (
     <Text
-      style={vars({
-        textHeight: dp(textHeight),
-        leading: dp(leading),
-      })}
-      className={cn('font-sf-pro-semibold text-[length:--textHeight] leading-[--leading]', className)}
+      style={{
+        fontSize: dp(textHeight),
+        lineHeight: dp(leading),
+      }}
+      className={cn('font-sf-pro-semibold', className)}
     >
       {children}
     </Text>
@@ -74,12 +73,7 @@ export const ButtonContent = ({
   const { dp } = useScale()
   return (
     <ButtonText className={cn('text-white', className)}>
-      <View
-        style={vars({
-          gap: dp(gap),
-        })}
-        className="flex flex-row gap-[--gap]"
-      >
+      <View style={{ flexDirection: 'row', gap: dp(gap) }}>
         {symbol}
         {text}
       </View>
@@ -140,19 +134,14 @@ export const Button = forwardRef<PressableRef, ButtonProps>(
     return (
       <StyledPressable
         ref={ref}
-        style={[
-          vars({
-            h: dp(height),
-            w: dp(width),
-            px: dp(paddingHorizontal),
-            py: dp(paddingVertical),
-            rounded: dp(borderRadius),
-          }),
-        ]}
-        className={cn(
-          '[--w] flex h-[--h] flex-col items-center justify-center rounded-[--rounded] bg-[#6B6B6B80] px-[--px] py-[--py] shadow-button',
-          className,
-        )}
+        style={{
+          height: dp(height),
+          width: dp(width),
+          paddingHorizontal: dp(paddingHorizontal),
+          paddingVertical: dp(paddingVertical),
+          borderRadius: dp(borderRadius),
+        }}
+        className={cn('flex flex-col items-center justify-center bg-[#6B6B6B80] shadow-button', className)}
         hoveredClassName={cn('bg-[#FFFFFF]', hoveredClassName)}
         focusedClassName={cn('bg-[#FFFFFF]', focusedClassName)}
         pressedClassName={cn('bg-[#FFFFFF]', pressedClassName)}

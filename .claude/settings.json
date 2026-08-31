@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(yarn install)",
+      "Bash(yarn test:*)",
+      "Bash(yarn jest:*)",
+      "Bash(yarn check:lint:*)",
+      "Bash(yarn check:prettier:*)",
+      "Bash(yarn check:expo:*)",
+      "Bash(yarn screenshots:*)",
+      "Bash(npx prettier:*)",
+      "Bash(npx tsc:*)",
+      "Bash(npx expo-doctor:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git stash:*)",
+      "mcp__ide__getDiagnostics"
+    ],
+    "deny": ["Read(./.env)", "Read(./.env.*)", "Read(./*credentials.json)"]
+  }
+}

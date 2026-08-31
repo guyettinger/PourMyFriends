@@ -1,13 +1,17 @@
 const expoConfig = require('eslint-config-expo/flat')
-const { defineConfig } = require('eslint/config')
+const eslintConfigPrettier = require('eslint-config-prettier/flat')
 
-module.exports = defineConfig([
-  expoConfig,
+/** @type {import('eslint').Linter.Config[]} */
+module.exports = [
   {
-    ignorePatterns: ['/dist/*', '/node_modules/*', '/.expo/*', '/ios/*', '/android/*'],
+    ignores: ['dist/*', '.expo/*', '.claude/*', 'ios/*', 'android/*'],
+  },
+  ...expoConfig,
+  eslintConfigPrettier,
+  {
     rules: {
       'no-empty-pattern': 0,
       '@typescript-eslint/no-empty-object-type': 0,
     },
   },
-])
+]
